@@ -43,5 +43,5 @@
            <ExternalBond atomName="C04" />
        </Residue>    
    </Residues>  
-   <EANNForce file="tests/data/eann_model.pickle" pdb="tests/data/peg4.pdb" ngto="16" nipsin="2" rc="4"/>
+   <EANNForce file="tests/data/eann_model.pickle" pdb="tests/data/peg4.pdb" ngto="16" nipsin="2" rc="0.4"/>
 </ForceField>
