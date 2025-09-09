@@ -3,7 +3,6 @@ import jax.numpy as jnp
 from jax import jit, value_and_grad
 from functools import partial
 import numpy as np
-import MDAnalysis as mda
 from openmm import *
 from openmm.unit import *
 from openmm.app import *
