@@ -11,3 +11,4 @@ jaxlib>=0.4.1
 pymbar>=4.0.0
 tqdm
 rdkit==2022.03.2
+ase
