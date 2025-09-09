@@ -1,47 +1,20 @@
 import jax
 import jax.numpy as jnp
 from jax import jit, value_and_grad
-from flax import linen as nn
 from functools import partial
 import numpy as np
-import MDAnalysis as mda
 from openmm import *
 from openmm.unit import *
 from openmm.app import *
 
 from ase import Atoms
-from ase.io import read, Trajectory, write
+from ase.io import read, write
 from ase.calculators.calculator import Calculator, all_changes
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.md.verlet import VelocityVerlet
 from ase.stress import full_3x3_to_voigt_6_stress
-from ase.optimize import BFGS  
 
 from ase import units
-from ase.md.npt import NPT
-from ase.md.nptberendsen import NPTBerendsen
-from ase.md.langevin import Langevin
-from ase.md.nose_hoover_chain import NoseHooverChainNVT
-from ase.md import MDLogger
-from ase.io.trajectory import Trajectory
 from dmff.api import Hamiltonian
 from dmff.common import nblist
-from dmff.utils import jit_condition, regularize_pairs, pair_buffer_scales
-from dmff.admp.pairwise import distribute_scalar, distribute_v3
-from dmff.admp.spatial import pbc_shift
-import pickle
-import time
-
-from dmff.sgnn.gnn import MolGNNForce
-# from gnn import MolGNNForce
-from dmff.sgnn.graph import TopGraph, from_pdb
-# from graph import TopGraph, from_pdb
-
-# from eapnn import * 
-
-# from jax import config
-# config.update("jax_enable_x64", True)
-# config.update("jax_debug_nans", True)
 
 def get_atoms_box(atoms):
     box = atoms.get_cell() / 10.0
