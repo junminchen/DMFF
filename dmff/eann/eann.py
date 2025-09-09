@@ -13,6 +13,7 @@ import pickle
 # from jax.config import config
 # config.update("jax_debug_nans", True)
 
+
 def get_elem_indices(topology):
     species = []
     elements = []

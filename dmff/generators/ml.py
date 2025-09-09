@@ -82,7 +82,7 @@ class EANNGenerator:
         self.file = self.ffinfo["Forces"][self.name]["meta"]["file"]
         self.ngto = int(self.ffinfo["Forces"][self.name]["meta"]["ngto"])
         self.nipsin = int(self.ffinfo["Forces"][self.name]["meta"]["nipsin"])
-        self.rc = int(self.ffinfo["Forces"][self.name]["meta"]["rc"])
+        self.rc = float(self.ffinfo["Forces"][self.name]["meta"]["rc"]) * 10
 
         self.pdb = self.ffinfo["Forces"][self.name]["meta"]["pdb"]
         self.ommtopology = app.PDBFile(self.pdb).topology
@@ -92,7 +92,7 @@ class EANNGenerator:
         self.params = params
         # convert to jnp array
         for k in params:
-            params[k] = params[k]
+            params[k] = jnp.array(params[k])
             # set mask to all true
             paramset.addParameter(params[k], k, field=self.name, mask=jnp.ones(params[k].shape))
 

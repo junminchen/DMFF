@@ -1,0 +1,10 @@
+ <Residues>
+  <Residue name="HOH">
+   <Atom name="O" type="380"/>
+   <Atom name="H1" type="381"/>
+   <Atom name="H2" type="381"/>
+   <Bond from="1" to="0"/>
+   <Bond from="2" to="0"/>
+ </Residue>
+ </Residues>
+

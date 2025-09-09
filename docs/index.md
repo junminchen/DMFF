@@ -28,6 +28,7 @@ DOI: 10.1021/acs.jctc.2c01297`
   + [Mbar Estimator](./user_guide/4.6MBAR.md)
   + [OpenMM Plugin](./user_guide/4.7OpenMMplugin.md)
   + [DiffTraj](./user_guide/4.8DiffTraj.md)
+  + [ASE MD interface](./user_guide/4.9ASE.md)
 + [5. Advanced examples](./user_guide/DMFF_example.ipynb)
 
 ## Developer Guide
