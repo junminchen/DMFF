@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 from jax import jit, value_and_grad
-from flax import linen as nn
 from functools import partial
 import numpy as np
 import MDAnalysis as mda
