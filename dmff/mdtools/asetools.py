@@ -68,12 +68,13 @@ class DMFFCalculator(Calculator):
         positions = jnp.array(atoms.get_positions()) / 10.0 
         box, box_inv = get_atoms_box(atoms)
         volume = jnp.linalg.det(box)
-        spositions = jnp.matmul(box_inv, positions.T).T
+        # spositions = jnp.matmul(box_inv, positions.T).T
         self.nbl.update(positions, box)
         pairs = self.nbl.pairs
 
         energy, (grad, dE_dB) = self.calc_dmff(positions, box, pairs)
-        virial = (jnp.matmul(-grad.T, spositions) - dE_dB) * box
+        # virial = (jnp.matmul(-grad.T, spositions) - dE_dB) * box
+        virial = positions.T @ (-grad) - box.T @ dE_dB
 
         self.results['energy'] = energy.item() * 0.010364  # kj/mol to eV
         self.results['forces'] = np.array(-grad) * 0.010364 / 10.0
