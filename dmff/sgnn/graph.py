@@ -36,14 +36,28 @@ This module works on building graphs based on molecular topology
 #         'O': 3,
 #         'S': 4
 #         }
-ATYPE_INDEX = {'H': 0, 'C': 1, 'O': 2}
+ATYPE_INDEX = {
+    'H': 0, 'He': 1,
+    'Li': 2, 'Be': 3,
+    'B': 4, 'C': 5, 'N': 6, 'O': 7, 'F': 8, 'Ne': 9,
+    'Na': 10, 'Mg': 11,
+    'Al': 12, 'Si': 13, 'P': 14, 'S': 15, 'Cl': 16, 'Ar': 17,
+    'K': 18, 'Ca': 19
+}
 # ATYPE_INDEX = {'H': 0, 'B':1, 'C': 2, 'N': 3 , 'O': 4, 'F': 5, 'P': 6, 'S':7 }
 N_ATYPES = len(ATYPE_INDEX.keys())
 
 # used to compute equilibrium bond lengths
 # COVALENT_RADIUS = {'H': 0.31, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'S': 1.05, }
-COVALENT_RADIUS = {'H': 0.31, 'B': 0.84, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57, 'S': 1.05, 'P': 1.07 }
-
+# COVALENT_RADIUS = {'H': 0.31, 'B': 0.84, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57, 'S': 1.05, 'P': 1.07 }
+COVALENT_RADIUS = {
+    'H': 0.31, 'He': 0.28,
+    'Li': 1.28, 'Be': 0.96,
+    'B': 0.84, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57, 'Ne': 0.58,
+    'Na': 1.66, 'Mg': 1.41,
+    'Al': 1.21, 'Si': 1.11, 'P': 1.10, 'S': 1.05, 'Cl': 1.02, 'Ar': 1.06,
+    'K': 2.03, 'Ca': 1.76
+}
 # scaling parameters for feature calculations
 FSCALE_BOND = 10.0
 FSCALE_ANGLE = 5.0
