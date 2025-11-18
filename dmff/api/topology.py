@@ -355,9 +355,9 @@ class DMFFTopology:
             bInfo[(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())] = bond.GetBondType()
         mol.UpdatePropertyCache()
         for atom in mol.GetAtoms():
-            if atom.GetSymbol() == "N" and atom.GetExplicitValence() == 4:
+            if atom.GetSymbol() == "N" and atom.GetValence(which=Chem.ValenceType.EXPLICIT) == 4:
                 atom.SetFormalCharge(1)
-            elif atom.GetSymbol() == "O" and atom.GetExplicitValence() == 3:
+            elif atom.GetSymbol() == "O" and atom.GetValence(which=Chem.ValenceType.EXPLICIT) == 3:
                 atom.SetFormalCharge(1)
         Chem.SanitizeMol(mol)
         rings = [tuple(r) for r in Chem.GetSymmSSSR(mol)]
