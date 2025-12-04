@@ -1,4 +1,4 @@
-from jax.config import config
+import jax
 
 PRECISION = 'double'  # 'double'
 
@@ -9,9 +9,9 @@ DEBUG = False
 
 def update_jax_precision(precision):
     if precision == 'double':
-        config.update("jax_enable_x64", True)
+        jax.config.update("jax_enable_x64", True)
     else:
-        config.update("jax_enable_x64", False)
+        jax.config.update("jax_enable_x64", False)
 
 
 update_jax_precision(PRECISION)
