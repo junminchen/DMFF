@@ -37,6 +37,9 @@ POL_DAMP_THOLE = 0  # Thole damping only (default)
 POL_DAMP_TT = 1     # Tang-Toennies damping only
 POL_DAMP_THOLE_TT = 2  # Thole * TT damping (multiplicative)
 
+# Maximum value for br in TT damping to avoid overflow in exp(-br)
+MAX_BR_TT_DAMPING = 50.0
+
 
 class ADMPPmeForce:
     """
@@ -817,7 +820,7 @@ def compute_tt_damping_pol(dr, b1, b2):
     br = b * dr
     
     # Avoid overflow for large br
-    br = jnp.minimum(br, 50.0)
+    br = jnp.minimum(br, MAX_BR_TT_DAMPING)
     exp_br = jnp.exp(-br)
     
     br2 = br * br
@@ -1255,7 +1258,9 @@ def pme_real(
             b1 = distribute_scalar(B_pol, pairs[:, 0])
             b2 = distribute_scalar(B_pol, pairs[:, 1])
         else:
-            # Create dummy arrays with correct shape for vmap
+            # Create dummy arrays with correct shape for vmap compatibility.
+            # JAX's vmap requires consistent array shapes across iterations,
+            # so we use zero arrays when TT damping is not used.
             n_pairs = pairs.shape[0]
             b1 = jnp.zeros(n_pairs)
             b2 = jnp.zeros(n_pairs)
