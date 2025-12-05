@@ -860,7 +860,6 @@ def calc_tt_damping_pol(dr, b1, b2):
     br3 = br2 * br
     br4 = br3 * br
     br5 = br4 * br
-    br6 = br5 * br
     
     # Avoid exp overflow for large br
     exp_br = jnp.piecewise(
