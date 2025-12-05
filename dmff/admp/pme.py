@@ -33,6 +33,11 @@ from .pairwise import (
 # DEFAULT_THOLE_WIDTH = 5.0
 DEFAULT_THOLE_WIDTH = 5.0
 
+# TT damping mode constants for polarization
+TT_DAMPING_MODE_NONE = 0      # No TT damping (use Thole only)
+TT_DAMPING_MODE_MULTIPLY = 1  # Multiply TT damping with Thole damping
+TT_DAMPING_MODE_REPLACE = 2   # Replace Thole damping with TT damping
+
 # variables used in soft dipole truncation
 MAX_DIP = 1.0
 TRUNCATION_HARDNESS = 25 # the smaller, the softer
@@ -63,6 +68,7 @@ class ADMPPmeForce:
         lpme=True,
         steps_pol=None,
         has_aux=False,
+        tt_damping_mode=TT_DAMPING_MODE_NONE,
     ):
         """
         Initialize the ADMPPmeForce calculator.
@@ -87,6 +93,11 @@ class ADMPPmeForce:
                 None or int: Whether do fixed number of dipole iteration steps?
                 if None: converge dipoles until convergence threshold is met
                 if int: optimize for this many steps and stop, this is useful if you want to jit the entire function
+            tt_damping_mode:
+                int: TT damping mode for polarization:
+                    0 (TT_DAMPING_MODE_NONE): No TT damping, use Thole only
+                    1 (TT_DAMPING_MODE_MULTIPLY): Multiply TT damping with Thole damping
+                    2 (TT_DAMPING_MODE_REPLACE): Replace Thole damping with TT damping
 
         Output:
 
@@ -116,6 +127,7 @@ class ADMPPmeForce:
         # self.n_atoms = int(covalent_map.shape[0]) # len(axis_type)
         self.n_atoms = len(axis_type)
         self.has_aux = has_aux
+        self.tt_damping_mode = tt_damping_mode
 
         self.Q_local_to_global = self.generate_Q_global_function()
 
@@ -164,6 +176,7 @@ class ADMPPmeForce:
                 mScales,
                 pScales,
                 dScales,
+                b_pols=None,
             ):
                 return energy_pme(
                     positions,
@@ -185,6 +198,8 @@ class ADMPPmeForce:
                     self.lmax,
                     True,
                     lpme=self.lpme,
+                    b_pols=b_pols,
+                    tt_damping_mode=self.tt_damping_mode,
                 )
 
             self.energy_fn = energy_fn
@@ -205,6 +220,7 @@ class ADMPPmeForce:
                 dScales,
                 U_init=U_ind,
                 aux=None,
+                b_pols=None,
             ):
                 U_ind, lconverg, n_cycle = self.optimize_Uind(
                     positions,
@@ -218,6 +234,7 @@ class ADMPPmeForce:
                     dScales,
                     U_init=U_init * 10.0,
                     steps_pol=self.steps_pol,
+                    b_pols=b_pols,
                 )  # nm to angstrom
                 self.U_ind = U_ind
                 # here we rely on Feynman-Hellman theorem, drop the term dV/dU*dU/dr !
@@ -233,6 +250,7 @@ class ADMPPmeForce:
                     mScales,
                     pScales,
                     dScales,
+                    b_pols,
                 )
                 if aux is not None:
                     aux["U_ind"] = U_ind * 0.1  # Angstrom to nm
@@ -365,6 +383,7 @@ class ADMPPmeForce:
         steps_pol=None,
         maxiter=MAX_N_POL,
         thresh=POL_CONV,
+        b_pols=None,
     ):
         """
         This function converges the induced dipole
@@ -380,6 +399,8 @@ class ADMPPmeForce:
         mScales = jax.lax.stop_gradient(mScales)
         pScales = jax.lax.stop_gradient(pScales)
         dScales = jax.lax.stop_gradient(dScales)
+        if b_pols is not None:
+            b_pols = jax.lax.stop_gradient(b_pols)
         if U_init is None:
             U = jnp.zeros((self.n_atoms, 3))
         else:
@@ -400,6 +421,7 @@ class ADMPPmeForce:
                     mScales,
                     pScales,
                     dScales,
+                    b_pols,
                 )
                 # E = self.energy_fn(positions, box, pairs, Q_local, U, pol, tholes, mScales, pScales, dScales)
                 if jnp.max(jnp.abs(field[site_filter])) < thresh:
@@ -424,6 +446,7 @@ class ADMPPmeForce:
                     mScales,
                     pScales,
                     dScales,
+                    b_pols,
                 )
                 U = U - field * pol[:, jnp.newaxis] / DIELECTRIC
                 # soft truncation: stop polarization catastrophe
@@ -526,6 +549,8 @@ def energy_pme(
     lmax,
     lpol,
     lpme=True,
+    b_pols=None,
+    tt_damping_mode=TT_DAMPING_MODE_NONE,
 ):
     """
     This is the top-level wrapper for multipole PME
@@ -564,6 +589,10 @@ def energy_pme(
             bool: if polarizable or not? if yes, 1, otherwise 0
         lpme:
             bool: doing pme? If false, then turn off reciprocal space and set kappa = 0
+        b_pols:
+            (Na,) float: TT damping parameters B for polarization (in A^-1), optional
+        tt_damping_mode:
+            int: TT damping mode (0=none, 1=multiply, 2=replace)
 
     Output:
         energy: total pme energy
@@ -607,6 +636,8 @@ def energy_pme(
             kappa,
             lmax,
             True,
+            b_pols,
+            tt_damping_mode,
         )
     else:
         ene_real = pme_real(
@@ -623,6 +654,8 @@ def energy_pme(
             kappa,
             lmax,
             False,
+            None,
+            TT_DAMPING_MODE_NONE,
         )
 
     if lpme:
@@ -803,8 +836,65 @@ def gen_trim_val_infty(thresh):
 trim_val_infty = gen_trim_val_infty(1e8)
 
 
-@jit_condition(static_argnums=(7))
-def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
+@jit_condition(static_argnums=())
+def calc_tt_damping_pol(dr, b1, b2):
+    r"""
+    Calculate Tang-Toennies damping factors for polarization interactions.
+    
+    The TT damping function is:
+    f_n(br) = 1 - exp(-br) * sum_{k=0}^{n} (br)^k / k!
+    
+    where br = sqrt(b1 * b2) * dr
+    
+    Inputs:
+        dr: float, distance between particles
+        b1: float, TT damping parameter B for particle i
+        b2: float, TT damping parameter B for particle j
+        
+    Output:
+        tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1: TT damping factors for different interactions
+    """
+    b = jnp.sqrt(b1 * b2)
+    br = b * dr
+    br2 = br * br
+    br3 = br2 * br
+    br4 = br3 * br
+    br5 = br4 * br
+    br6 = br5 * br
+    
+    # Avoid exp overflow for large br
+    exp_br = jnp.piecewise(
+        br, [br < 50, br >= 50], [lambda br: jnp.exp(-br), lambda br: jnp.array(0.0)]
+    )
+    
+    # TT damping factors: f_n = 1 - exp(-br) * sum_{k=0}^{n} (br)^k / k!
+    # For C-Uind (n=2): f_2 = 1 - exp(-br) * (1 + br + br^2/2)
+    tt_c = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
+    
+    # For D-Uind m=0 (n=3): f_3 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6)
+    tt_d0 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0)
+    
+    # For D-Uind m=1 (n=2): same as tt_c
+    tt_d1 = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
+    
+    # For Q-Uind m=0 (n=4): f_4 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6 + br^4/24)
+    tt_q0 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
+    
+    # For Q-Uind m=1 (n=3): same as tt_d0
+    tt_q1 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0)
+    
+    # For O-Uind m=0 (n=5): f_5 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6 + br^4/24 + br^5/120)
+    tt_o0 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0 + br5 / 120.0)
+    
+    # For O-Uind m=1 (n=4): same as tt_q0
+    tt_o1 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
+    
+    return tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1
+
+
+@jit_condition(static_argnums=(7, 10))
+def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
+               b_pol1=None, b_pol2=None, tt_damping_mode=TT_DAMPING_MODE_NONE):
     r"""
     This function calculates the eUindCoefs at once
        ## compute the Thole damping factors for energies
@@ -815,18 +905,29 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
     Inputs:
         dr:
             float: distance between one pair of particles
-        dmp
-            float: damping factors between one pair of particles
-        mscales:
-            float: scaling factor between permanent - permanent multipole interactions, for each pair
+        thole1:
+            float: thole damping coeff of site i
+        thole2:
+            float: thole damping coeff of site j
+        dmp:
+            float: damping factors between one pair of particles, (pol1 * pol2)**1/6
         pscales:
             float: scaling factor between permanent - induced multipole interactions, for each pair
-        au:
-            float: for damping factors
+        dscales:
+            float: scaling factor between induced - induced multipole interactions, for each pair
         kappa:
             float: \kappa in PME, unit in A^-1
         lmax:
             int: max L
+        b_pol1:
+            float: TT damping parameter B for site i (in A^-1), optional
+        b_pol2:
+            float: TT damping parameter B for site j (in A^-1), optional
+        tt_damping_mode:
+            int: TT damping mode:
+                0 (TT_DAMPING_MODE_NONE): No TT damping, use Thole only
+                1 (TT_DAMPING_MODE_MULTIPLY): Multiply TT damping with Thole damping
+                2 (TT_DAMPING_MODE_REPLACE): Replace Thole damping with TT damping
 
     Output:
         Interaction tensors components
@@ -857,8 +958,32 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
     thole_d1 = 1.0 - expau * (1.0 + au + 0.5 * au2)
     thole_q0 = 1.0 - expau * (1.0 + au + 0.5 * au2 + au3 / 6.0 + au4 / 18.0)
     thole_q1 = 1.0 - expau * (1.0 + au + 0.5 * au2 + au3 / 6.0)
-    thole_o0  = 1.0 - expau*(1.0 + au + 0.5*au2 + au3/6.0 + au4/24.0 + au5/120.0)
-    thole_o1  = 1.0 - expau*(1.0 + au + 0.5*au2 + au3/6.0 + au4/30.0)
+    thole_o0 = 1.0 - expau * (1.0 + au + 0.5 * au2 + au3 / 6.0 + au4 / 24.0 + au5 / 120.0)
+    thole_o1 = 1.0 - expau * (1.0 + au + 0.5 * au2 + au3 / 6.0 + au4 / 30.0)
+    
+    # Apply TT damping based on mode
+    if tt_damping_mode == TT_DAMPING_MODE_MULTIPLY or tt_damping_mode == TT_DAMPING_MODE_REPLACE:
+        # Calculate TT damping factors
+        tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1 = calc_tt_damping_pol(dr, b_pol1, b_pol2)
+        
+        if tt_damping_mode == TT_DAMPING_MODE_MULTIPLY:
+            # Multiply TT damping with Thole damping
+            thole_c = thole_c * tt_c
+            thole_d0 = thole_d0 * tt_d0
+            thole_d1 = thole_d1 * tt_d1
+            thole_q0 = thole_q0 * tt_q0
+            thole_q1 = thole_q1 * tt_q1
+            thole_o0 = thole_o0 * tt_o0
+            thole_o1 = thole_o1 * tt_o1
+        else:  # TT_DAMPING_MODE_REPLACE
+            # Replace Thole damping with TT damping
+            thole_c = tt_c
+            thole_d0 = tt_d0
+            thole_d1 = tt_d1
+            thole_q0 = tt_q0
+            thole_q1 = tt_q1
+            thole_o0 = tt_o0
+            thole_o1 = tt_o1
     
     # copied from calc_e_perm
     # be aware of unit and dimension !!
@@ -941,8 +1066,8 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
     return cud, dud_m0, dud_m1, udq_m0, udq_m1, udo_m0, udo_m1, udud_m0, udud_m1
 
 
-@partial(vmap, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None), out_axes=0)
-@jit_condition(static_argnums=(12, 13))
+@partial(vmap, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None), out_axes=0)
+@jit_condition(static_argnums=(14, 15, 16))
 def pme_real_kernel(
     dr,
     qiQI,
@@ -955,9 +1080,12 @@ def pme_real_kernel(
     mscales,
     pscales,
     dscales,
+    b_pol1,
+    b_pol2,
     kappa,
     lmax=2,
     lpol=False,
+    tt_damping_mode=TT_DAMPING_MODE_NONE,
 ):
     """
     This is the heavy-lifting kernel function to compute the realspace multipolar PME
@@ -986,12 +1114,18 @@ def pme_real_kernel(
             float, scaling factor between perm-ind interaction
         dscale:
             float, scaling factor between ind-ind interaction
+        b_pol1:
+            float: TT damping parameter B for site i (in A^-1), optional
+        b_pol2:
+            float: TT damping parameter B for site j (in A^-1), optional
         kappa:
             float, kappa in unit A^1
         lmax:
             int, maximum angular momentum
         lpol:
             bool, doing polarization?
+        tt_damping_mode:
+            int: TT damping mode (0=none, 1=multiply, 2=replace)
 
     Output:
         energy:
@@ -1002,7 +1136,8 @@ def pme_real_kernel(
     )
     if lpol:
         cud, dud_m0, dud_m1, udq_m0, udq_m1, udo_m0, udo_m1, udud_m0, udud_m1 = calc_e_ind(
-            dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax
+            dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax,
+            b_pol1, b_pol2, tt_damping_mode
         )
 
     Vij0 = cc * qiQI[0]
@@ -1205,6 +1340,8 @@ def pme_real(
     kappa,
     lmax,
     lpol,
+    b_pols=None,
+    tt_damping_mode=TT_DAMPING_MODE_NONE,
 ):
     """
     This is the real space PME calculate function
@@ -1239,6 +1376,10 @@ def pme_real(
             int: maximum L
         lpol:
             Bool: whether do a polarizable calculation?
+        b_pols:
+            (Na,): TT damping parameters B for polarization (in A^-1), optional
+        tt_damping_mode:
+            int: TT damping mode (0=none, 1=multiply, 2=replace)
 
     Output:
         ene: pme realspace energy
@@ -1267,6 +1408,14 @@ def pme_real(
         dscales = distribute_scalar(dScales, indices)
         dscales = dscales * buffer_scales
         dmp = get_pair_dmp(pol1, pol2)
+        # Handle TT damping parameters
+        if b_pols is not None and tt_damping_mode != TT_DAMPING_MODE_NONE:
+            b_pol1 = distribute_scalar(b_pols, pairs[:, 0])
+            b_pol2 = distribute_scalar(b_pols, pairs[:, 1])
+        else:
+            # Use zeros as placeholder when TT damping is disabled
+            b_pol1 = jnp.zeros_like(pol1)
+            b_pol2 = jnp.zeros_like(pol2)
     else:
         Uind_extendi = None
         Uind_extendj = None
@@ -1275,6 +1424,8 @@ def pme_real(
         thole1 = None
         thole2 = None
         dmp = None
+        b_pol1 = None
+        b_pol2 = None
 
     # deals with geometries
     dr = r1 - r2
@@ -1304,9 +1455,12 @@ def pme_real(
             mscales,
             pscales,
             dscales,
+            b_pol1,
+            b_pol2,
             kappa,
             lmax,
             lpol,
+            tt_damping_mode,
         )
         * buffer_scales
     )
