@@ -531,7 +531,7 @@ _DMFFGenerators["QqTtDampingForce"] = QqTtDampingGenerator
 class PolTtDampingGenerator:
     r"""
     This one calculates the Tang-Toennies damping of polarization interaction
-    E = \sum_ij [1 - exp(-B*r)*(1+B*r+0.5*(B*r)^2)] * pol_i * pol_j / r^3
+    E = \sum_ij [1 - exp(-B*r)*(1+B*r+0.5*(B*r)^2)] * sqrt(pol_i * pol_j) / r^3
     This provides a separate interface for optimizing polarization damping parameters (B_pol)
     """
 

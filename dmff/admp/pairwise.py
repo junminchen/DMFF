@@ -229,5 +229,5 @@ def TT_damping_pol_kernel(dr, m, bi, bj, poli, polj):
     # The energy is proportional to -pol^2/r^3 with damping
     # Using DIELECTRIC for unit conversion
     damping_factor = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
-    f = - DIELECTRIC * damping_factor * pol / (dr**3)
-    return f * m 
+    energy = - DIELECTRIC * damping_factor * pol / (dr**3)
+    return energy * m 

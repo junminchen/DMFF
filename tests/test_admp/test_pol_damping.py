@@ -15,10 +15,10 @@ class TestPolTtDampingForce:
     """
 
     @pytest.mark.parametrize(
-        "pdb, prm", 
+        "pdb, prm",
         [
             (
-                "tests/data/peg2.pdb", 
+                "tests/data/peg2.pdb",
                 "tests/data/peg_with_pol_damping.xml",
             ),
         ]
