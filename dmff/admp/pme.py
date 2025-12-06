@@ -43,6 +43,9 @@ TT_DAMPING_MODE_REPLACE = 2   # Replace Thole damping with TT damping
 # TT damping is applied when at least one atom has B_pol > threshold
 B_POL_THRESH = 1e-6
 
+# Small epsilon for numerical stability in sqrt operations
+SQRT_EPSILON = 1e-20
+
 # variables used in soft dipole truncation
 MAX_DIP = 1.0
 TRUNCATION_HARDNESS = 25 # the smaller, the softer
@@ -878,7 +881,7 @@ def calc_tt_damping_pol(dr, b1, b2):
     # Compute effective b for TT damping:
     # - If both have B_pol > 0: use geometric mean sqrt(b1 * b2)
     # - If only one has B_pol > 0: use the non-zero value (max(b1, b2))
-    b_geom = jnp.sqrt(b1 * b2 + 1e-20)  # Add small value to avoid sqrt(0)
+    b_geom = jnp.sqrt(b1 * b2 + SQRT_EPSILON)  # Add small value to avoid sqrt(0)
     b_max = jnp.maximum(b1, b2)
     b = jnp.where(has_both_b, b_geom, b_max)
     
