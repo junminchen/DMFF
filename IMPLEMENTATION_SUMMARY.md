@@ -1,4 +1,4 @@
-# Implementation Summary: PolTtDampingForce
+# Implementation Summary: SlaterSrPolForce with Polarization Damping
 
 ## Issue Resolution
 
@@ -9,59 +9,52 @@
 The polarization damping in ADMP is integrated into ADMPPMEforce, making it difficult to adjust B_pol values during optimization when subtracting long-range components. Can you expose a damping interface for optimization? Or add it directly to SlaterSrPolForce? Or create a new PolTtDampingForce similar to QqTtDampingForce?
 
 **Solution:**
-Implemented a new `PolTtDampingForce` that provides an independent, optimizable interface for polarization damping parameters.
+Integrated polarization damping directly into `SlaterSrPolForce`, sharing the B parameter between the Slater SR term and the TT damping term as requested by @junminchen.
 
 ---
 
 ## Technical Implementation
 
-### 1. Kernel Function (`dmff/admp/pairwise.py`)
+### 1. Modified SlaterSrPolGenerator (`dmff/generators/admp.py`)
 
-Added `TT_damping_pol_kernel` function that implements Tang-Toennies style damping for polarization:
+Enhanced `SlaterSrPolGenerator` to include polarization damping functionality:
 
-```python
-@vmap
-@jit_condition(static_argnums={})
-def TT_damping_pol_kernel(dr, m, bi, bj, poli, polj):
-    """
-    Formula: E = -DIELECTRIC * [1 - exp(-Br)(1+Br+0.5(Br)²)] × √(pol_i·pol_j) / r³
-    """
-```
+**Changes:**
+- Added `Pol` parameter parsing in `__init__`
+- Overrode `overwrite` method to handle Pol parameter updates
+- Overrode `createPotential` to compute both terms using shared B parameter
+
+**Two kernel functions used:**
+1. `slater_sr_kernel` (existing): Original Slater SR term
+2. `TT_damping_pol_kernel` (existing): Tang-Toennies polarization damping
 
 **Key Features:**
 - Fully differentiable with JAX
 - Vectorized with `vmap` for efficiency
-- Uses Tang-Toennies damping function
+- Shared B parameter between both terms
 - Unit conversion: nm → Å internally
 
-### 2. Generator Class (`dmff/generators/admp.py`)
+### 2. XML Format Update (`tests/data/peg.xml`)
 
-Created `PolTtDampingGenerator` class (133 lines) that:
-
-**Parses XML:**
+Updated XML to include `Pol` parameter:
 ```xml
-<PolTtDampingForce pScale12="0.00" pScale13="0.00" pScale14="1.00">
-    <Atom type="1" B="3.977508e+01" Pol="1.072970e-03"/>
-</PolTtDampingForce>
+<SlaterSrPolForce mScale12="0.00" mScale13="0.00" mScale14="1.00">
+    <Atom type="1" A="1" B="3.977508e+01" Pol="1.072970e-03"/>
+</SlaterSrPolForce>
 ```
 
 **Parameters:**
-- `B`: Damping parameter (nm⁻¹)
-- `Pol`: Polarizability (nm³)
-- `pScale12-16`: Scaling factors for bonded pairs
+- `A`: Amplitude parameter for Slater SR term
+- `B`: Shared damping parameter (nm⁻¹) for both terms
+- `Pol`: Polarizability (nm³) - **optional**, defaults to 0.0
+- `mScale12-16`: Scaling factors for bonded pairs
 
-**Methods:**
-- `__init__`: Parse XML and initialize parameters
-- `createPotential`: Create energy calculation function
-- `overwrite`: Update XML with optimized parameters
-- `getJaxPotential`: Return JAX-compatible potential function
+### 3. Key Benefits
 
-### 3. Registration
-
-Automatically registered in DMFF:
-```python
-_DMFFGenerators["PolTtDampingForce"] = PolTtDampingGenerator
-```
+- **Shared B parameter**: Both Slater SR and damping terms use the same B
+- **Convenient optimization**: Optimize A, B, and Pol together
+- **Backward compatible**: Pol is optional (defaults to 0.0)
+- **Cleaner design**: One force instead of two separate ones
 
 ---
 
@@ -76,7 +69,7 @@ import openmm.unit as unit
 
 # Load system
 pdb = app.PDBFile('system.pdb')
-H = Hamiltonian('forcefield.xml')  # Contains PolTtDampingForce
+H = Hamiltonian('forcefield.xml')  # Contains SlaterSrPolForce with Pol
 
 # Create potentials
 pots = H.createPotential(
@@ -85,9 +78,9 @@ pots = H.createPotential(
     nonbondedMethod=app.CutoffPeriodic,
 )
 
-# Calculate polarization damping energy
-pot_pol = pots.dmff_potentials['PolTtDampingForce']
-E_pol = pot_pol(positions, box, pairs, H.paramset)
+# Calculate combined energy (SR + polarization damping)
+pot_sr_pol = pots.dmff_potentials['SlaterSrPolForce']
+E_total = pot_sr_pol(positions, box, pairs, H.paramset)
 ```
 
 ### Parameter Optimization
@@ -96,19 +89,23 @@ E_pol = pot_pol(positions, box, pairs, H.paramset)
 from jax import grad
 
 # Access parameters
-B_pol = H.paramset.parameters['PolTtDampingForce']['B']
+params = H.paramset.parameters['SlaterSrPolForce']
+B = params['B']
+Pol = params['Pol']
 
-# Define loss function
-def loss(B_params):
-    H.paramset.parameters['PolTtDampingForce']['B'] = B_params
-    E = pot_pol(positions, box, pairs, H.paramset)
+# Define loss function (B affects both SR and damping terms)
+def loss(B_params, Pol_params):
+    H.paramset.parameters['SlaterSrPolForce']['B'] = B_params
+    H.paramset.parameters['SlaterSrPolForce']['Pol'] = Pol_params
+    E = pot_sr_pol(positions, box, pairs, H.paramset)
     return (E - E_reference)**2
 
 # Optimize with gradient descent
-grad_loss = grad(loss)
+grad_loss = grad(loss, argnums=(0, 1))
 for step in range(100):
-    g = grad_loss(B_pol)
-    B_pol = B_pol - learning_rate * g
+    g_B, g_Pol = grad_loss(B, Pol)
+    B = B - learning_rate * g_B
+    Pol = Pol - learning_rate * g_Pol
 ```
 
 ### With Long-Range Subtraction

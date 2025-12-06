@@ -1,6 +1,6 @@
-# PolTtDampingForce Optimization Example
+# SlaterSrPolForce with Polarization Damping - Optimization Example
 
-This example demonstrates how to optimize polarization damping parameters (B_pol) using the new `PolTtDampingForce`.
+This example demonstrates how to optimize polarization damping parameters (B_pol and Pol) using the enhanced `SlaterSrPolForce`.
 
 ## Background
 
@@ -10,7 +10,7 @@ In ADMP force fields, polarization damping is typically integrated into `ADMPPme
 2. Fit short-range components separately
 3. Adjust damping parameters independently
 
-The `PolTtDampingForce` provides a separate interface for this purpose.
+The enhanced `SlaterSrPolForce` now includes integrated polarization damping that shares the B parameter with the Slater SR term, making optimization more convenient.
 
 ## Files
 
@@ -30,30 +30,36 @@ from jax import grad
 # Load force field
 H = Hamiltonian('system.xml')
 
-# Access B_pol parameters
-B_pol = H.paramset.parameters['PolTtDampingForce']['B']
-print(f"Initial B_pol: {B_pol}")
+# Access SlaterSrPolForce parameters
+params = H.paramset.parameters['SlaterSrPolForce']
+B_pol = params['B']
+Pol = params['Pol']
+print(f"Initial B: {B_pol}")
+print(f"Initial Pol: {Pol}")
 
 # Define loss function
-def loss(params):
+def loss(B_params, Pol_params):
     # Update parameters
-    H.paramset.parameters['PolTtDampingForce']['B'] = params
+    H.paramset.parameters['SlaterSrPolForce']['B'] = B_params
+    H.paramset.parameters['SlaterSrPolForce']['Pol'] = Pol_params
     
-    # Calculate energy
-    E = pot_pol(pos, box, pairs, H.paramset)
+    # Calculate energy (includes both SR and damping terms)
+    E = pot_sr_pol(pos, box, pairs, H.paramset)
     
     # Compare to reference
     return (E - E_ref)**2
 
 # Optimize
-grad_loss = grad(loss)
+grad_loss = grad(loss, argnums=(0, 1))
 for i in range(100):
-    g = grad_loss(B_pol)
-    B_pol = B_pol - 0.01 * g  # Gradient descent
-    print(f"Step {i}: loss = {loss(B_pol)}")
+    g_B, g_Pol = grad_loss(B_pol, Pol)
+    B_pol = B_pol - 0.01 * g_B  # Gradient descent
+    Pol = Pol - 0.01 * g_Pol
+    print(f"Step {i}: loss = {loss(B_pol, Pol)}")
 
 # Save optimized parameters
-H.paramset.parameters['PolTtDampingForce']['B'] = B_pol
+H.paramset.parameters['SlaterSrPolForce']['B'] = B_pol
+H.paramset.parameters['SlaterSrPolForce']['Pol'] = Pol
 ```
 
 ### With Long-Range Subtraction
@@ -68,11 +74,13 @@ E_lr = calculate_longrange(pos, box, H.paramset)
 # Short-range component
 E_sr = E_full - E_lr
 
-# Now fit PolTtDampingForce to match E_sr
-def loss(B_pol):
-    H.paramset.parameters['PolTtDampingForce']['B'] = B_pol
-    E_pol_damping = pot_pol(pos, box, pairs, H.paramset)
-    return jnp.sum((E_pol_damping - E_sr)**2)
+# Now fit SlaterSrPolForce to match E_sr
+# Both B and Pol parameters affect the result
+def loss(B_pol, Pol):
+    H.paramset.parameters['SlaterSrPolForce']['B'] = B_pol
+    H.paramset.parameters['SlaterSrPolForce']['Pol'] = Pol
+    E_sr_pol = pot_sr_pol(pos, box, pairs, H.paramset)
+    return jnp.sum((E_sr_pol - E_sr)**2)
 ```
 
 ## Expected Output
@@ -96,5 +104,5 @@ Optimized B_pol: [38.42 44.21 45.88]
 
 ## See Also
 
-- [PolTtDampingForce Documentation](../../docs/user_guide/PolTtDampingForce.md)
+- [SlaterSrPolForce Documentation](../../docs/user_guide/SlaterSrPolForce.md)
 - [DMFF Optimization Guide](../../docs/user_guide/4.5Optimization.md)
