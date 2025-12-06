@@ -19,16 +19,59 @@ class TestPolTtDampingForce:
         [
             (
                 "tests/data/peg2.pdb", 
-                "tests/data/peg.xml",
+                "tests/data/peg_with_pol_damping.xml",
             ),
         ]
     )
-    def test_pol_damping_basic(self, pdb, prm):
+    def test_pol_damping_integration(self, pdb, prm):
         """Test that PolTtDampingForce can be created and evaluated"""
-        # This test uses the existing peg.xml file, but we'll only test 
-        # if the force can be instantiated when present
+        pdb_file = app.PDBFile(pdb)
+        H = Hamiltonian(prm)
+        rc = 1.49
         
-        # For now, just test the pairwise kernel directly
+        # Create potential
+        pots = H.createPotential(
+            pdb_file.topology, 
+            nonbondedCutoff=rc*unit.nanometer, 
+            nonbondedMethod=app.CutoffPeriodic,
+        )
+        
+        # Check that PolTtDampingForce is in the potentials
+        assert 'PolTtDampingForce' in pots.dmff_potentials, "PolTtDampingForce not found in potentials"
+        
+        pot_pol = pots.dmff_potentials['PolTtDampingForce']
+        
+        # Build neighbor list
+        dmfftop = DMFFTopology(from_top=pdb_file.topology)
+        covalent_map = dmfftop.buildCovMat()
+        
+        pos = jnp.array(pdb_file.positions._value)
+        box = jnp.array(pdb_file.topology.getPeriodicBoxVectors()._value)
+        
+        nbl = NeighborList(box, rc, covalent_map)
+        nbl.allocate(pos)
+        pairs = nbl.pairs
+        pairs = pairs[pairs[:, 0] < pairs[:, 1]]
+        
+        # Calculate energy
+        E_pol = pot_pol(pos, box, pairs, H.paramset)
+        
+        # Check energy properties
+        assert jnp.isfinite(E_pol), "Energy is not finite"
+        assert E_pol < 0, "Polarization damping energy should be negative (attractive)"
+        
+        # Test gradient
+        def energy_fn(positions):
+            return pot_pol(positions, box, pairs, H.paramset)
+        
+        energy, forces_raw = value_and_grad(energy_fn)(pos)
+        forces = -forces_raw
+        
+        assert forces.shape == pos.shape, "Forces shape mismatch"
+        assert jnp.all(jnp.isfinite(forces)), "Forces contain non-finite values"
+
+    def test_pol_damping_kernel_basic(self):
+        """Test the kernel function directly"""
         from dmff.admp.pairwise import TT_damping_pol_kernel
         
         # Test kernel with simple inputs
@@ -43,14 +86,14 @@ class TestPolTtDampingForce:
         energies = TT_damping_pol_kernel(dr, m, bi, bj, poli, polj)
         
         # Check that energies are computed and have the right shape
-        assert energies.shape == (3,)
+        assert energies.shape == (3,), f"Expected shape (3,), got {energies.shape}"
         
         # Check that energies are negative (attractive polarization)
-        assert jnp.all(energies < 0)
+        assert jnp.all(energies < 0), "All energies should be negative"
         
         # Check that energy magnitude decreases with distance
-        assert jnp.abs(energies[0]) > jnp.abs(energies[1])
-        assert jnp.abs(energies[1]) > jnp.abs(energies[2])
+        assert jnp.abs(energies[0]) > jnp.abs(energies[1]), "Energy should decrease with distance"
+        assert jnp.abs(energies[1]) > jnp.abs(energies[2]), "Energy should decrease with distance"
 
     def test_pol_damping_gradient(self):
         """Test that gradients can be computed"""
