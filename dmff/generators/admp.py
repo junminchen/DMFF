@@ -16,6 +16,7 @@ from ..admp.pairwise import (
     slater_sr_kernel, ## no Hard Core Potential
     slater_sr_hc_kernel,  ## added Hard Core Potential
     TT_damping_qq_kernel,
+    TT_damping_pol_kernel,
 )
 from ..admp.pme import ADMPPmeForce
 
@@ -525,6 +526,135 @@ class QqTtDampingGenerator:
 
 # register all parsers
 _DMFFGenerators["QqTtDampingForce"] = QqTtDampingGenerator
+
+
+class PolTtDampingGenerator:
+    r"""
+    This one calculates the Tang-Toennies damping of polarization interaction
+    E = \sum_ij exp(-B*r)*(1+B*r+0.5*(B*r)^2) * pol_i * pol_j / r^3
+    This provides a separate interface for optimizing polarization damping parameters (B_pol)
+    """
+
+    def __init__(self, ffinfo: dict, paramset: ParamSet):
+        self.ffinfo = ffinfo
+        self._jaxPotential = None
+        self.name = "PolTtDampingForce"
+        paramset.addField(self.name)
+        self.key_type = None
+        self.atom_keys = []
+
+        # get pscales (polarization scales)
+        default_scales = [0.0, 0.0, 1.0, 1.0, 1.0]
+
+        self.pScales = [
+            float(
+                self.ffinfo["Forces"][self.name]["meta"].get(
+                    f"pScale1{i}", default_scales[i - 2]
+                )
+            )
+            for i in range(2, 7)
+        ]
+        self.pScales.append(1.0)
+        self.pScales = jnp.array(self.pScales)
+
+        # get atomtypes
+        B, Pol = [], []
+        atom_mask = []
+        for node in self.ffinfo["Forces"][self.name]["node"]:
+            if node["name"] == "Atom":
+                attribs = node["attrib"]
+                if "type" in attribs:
+                    self.key_type = "type"
+                elif "class" in attribs:
+                    self.key_type = "class"
+                self.atom_keys.append(attribs[self.key_type])
+                B.append(float(attribs["B"]))
+                Pol.append(float(attribs["Pol"]))
+                mask = 1.0
+                if "mask" in attribs and attribs["mask"].upper() == "TRUE":
+                    mask = 0.0
+                atom_mask.append(mask)
+        B = jnp.array(B)
+        Pol = jnp.array(Pol)
+        atom_mask = jnp.array(atom_mask)
+        self.atom_keys = np.array(self.atom_keys)
+        paramset.addParameter(B, "B", field=self.name, mask=atom_mask)
+        paramset.addParameter(Pol, "Pol", field=self.name, mask=atom_mask)
+
+    def getName(self) -> str:
+        return self.name
+
+    def overwrite(self, paramset):
+        B = paramset[self.name]["B"]
+        Pol = paramset[self.name]["Pol"]
+        atom_mask = paramset.mask[self.name]["B"]
+
+        nnode = 0
+        for node in self.ffinfo["Forces"][self.name]["node"]:
+            if node["name"] == "Atom":
+                attribs = node["attrib"]
+                B_new = B[nnode]
+                Pol_new = Pol[nnode]
+                mask = atom_mask[nnode]
+                self.ffinfo["Forces"][self.name]["node"][nnode]["attrib"]["B"] = str(
+                    B_new
+                )
+                self.ffinfo["Forces"][self.name]["node"][nnode]["attrib"]["Pol"] = str(
+                    Pol_new
+                )
+                if mask < 0.999:
+                    self.ffinfo["Forces"][self.name]["node"][nnode]["attrib"][
+                        "mask"
+                    ] = "true"
+                nnode += 1
+
+    def _find_atype_key_index(self, atype: str):
+        for n, i in enumerate(self.atom_keys):
+            if i == atype:
+                return n
+        return None
+
+    def createPotential(
+        self, topdata: DMFFTopology, nonbondedMethod, nonbondedCutoff, **kwargs
+    ):
+        from ..admp.pairwise import TT_damping_pol_kernel
+        
+        n_atoms = topdata.getNumAtoms()
+        atoms = [a for a in topdata.atoms()]
+        # build index map
+        map_atomtype = np.zeros(n_atoms, dtype=int)
+        for i in range(n_atoms):
+            atype = atoms[i].meta[self.key_type]
+            map_atomtype[i] = np.where(self.atom_keys == atype)[0][0]
+
+        topdata._meta[self.name+"_map_atomtype"] = map_atomtype
+        pot_fn_sr = generate_pairwise_interaction(TT_damping_pol_kernel, static_args={})
+
+        has_aux = False
+        if "has_aux" in kwargs and kwargs["has_aux"]:
+            has_aux = True
+
+        def potential_fn(positions, box, pairs, params, aux = None):
+            positions = positions * 10
+            box = box * 10
+            params = params[self.name]
+            b_list = params["B"][map_atomtype] / 10  # convert to A^-1
+            pol_list = params["Pol"][map_atomtype] * 1000.0  # convert to A^3
+
+            E_sr = pot_fn_sr(positions, box, pairs, self.pScales, b_list, pol_list)
+            if has_aux:
+                return E_sr, aux
+            else:
+                return E_sr
+
+        self._jaxPotential = potential_fn
+        return potential_fn
+
+    def getJaxPotential(self):
+        return self._jaxPotential
+
+
+_DMFFGenerators["PolTtDampingForce"] = PolTtDampingGenerator
 
 
 class SlaterDampingGenerator:

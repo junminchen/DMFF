@@ -200,4 +200,34 @@ def slater_sr_kernel(dr, m, ai, aj, bi, bj):
     br2 = br * br
     P = 1/3 * br2 + br + 1
 
-    return a * P * jnp.exp(-br) * m 
+    return a * P * jnp.exp(-br) * m
+
+
+@vmap
+@jit_condition(static_argnums={})
+def TT_damping_pol_kernel(dr, m, bi, bj, poli, polj):
+    r"""
+    Tang-Toennies damping for polarization energy
+    This computes the damping term for polarization interactions
+    E = -exp(-B*r)*(1+B*r+0.5*(B*r)^2) * pol_i * pol_j / r^3
+    
+    Inputs:
+        dr: distance between particle i and j
+        m: scaling factor
+        bi, bj: B parameters for particles i and j
+        poli, polj: polarizabilities for particles i and j (in A^3)
+    
+    Output:
+        energy: the damped polarization energy contribution
+    """
+    b = jnp.sqrt(bi * bj)
+    pol = jnp.sqrt(poli * polj)
+    br = b * dr
+    br2 = br * br
+    exp_br = jnp.exp(-br)
+    # Thole-type damping: 1 - exp(-br)*(1 + br + 0.5*br^2)
+    # The energy is proportional to -pol^2/r^3 with damping
+    # Using DIELECTRIC for unit conversion
+    damping_factor = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
+    f = - DIELECTRIC * damping_factor * pol / (dr**3)
+    return f * m 
