@@ -1391,6 +1391,10 @@ class ADMPPmeGenerator:
         self.pme_force = pme_force
         topdata._meta[self.name+"_map_atomtype"] = map_atomtype
         topdata._meta[self.name+"_map_poltype"] = map_poltype
+        # Store for later use in getPotentialDamping
+        self._map_atomtype_stored = map_atomtype
+        self._map_poltype_stored = map_poltype
+        self._n_atoms_stored = n_atoms
 
         if "has_aux" in kwargs and kwargs["has_aux"]:
             has_aux = True
@@ -1442,6 +1446,79 @@ class ADMPPmeGenerator:
 
     def getJaxPotential(self):
         return self._jaxPotential
+
+    def getPotentialPol(self):
+        """
+        Get a potential function that computes only the polarization energy.
+        This is useful for optimization when you want to adjust polarization parameters (B_pol, etc.) independently.
+        
+        Must be called after createPotential().
+        
+        Usage:
+            To get damping contribution, you can compute:
+                E_damping = generator.getPotentialPol()(pos, box, pairs, params_with_Bpol) - 
+                           generator.getPotentialPol()(pos, box, pairs, params_with_Bpol_zero)
+        
+        Returns:
+            A function that takes (positions, box, pairs, params) and returns the polarization energy.
+        """
+        if not self.lpol:
+            # Non-polarizable force field has no polarization energy
+            def potential_pol_fn(positions, box, pairs, params):
+                return 0.0
+            return potential_pol_fn
+        
+        # Get the pme_force instance
+        if self.pme_force is None:
+            raise ValueError("Must call createPotential first to initialize pme_force")
+        
+        # Get stored metadata from when createPotential was called
+        # These are instance variables set during createPotential
+        if not hasattr(self, '_map_atomtype_stored') or not hasattr(self, '_map_poltype_stored'):
+            raise ValueError("Map atomtype/poltype not found. Make sure createPotential was called first.")
+        
+        map_atomtype = self._map_atomtype_stored
+        map_poltype = self._map_poltype_stored
+        n_atoms = len(map_atomtype)
+        
+        pme_force = self.pme_force
+        get_energy_pol = pme_force.get_energy_pol
+        
+        def potential_pol_fn(positions, box, pairs, params):
+            """
+            Compute the polarization energy.
+            
+            Args:
+                positions: atomic positions (in nm)
+                box: simulation box (in nm)
+                pairs: neighbor pairs
+                params: parameter set containing polarization parameters (pol, tholes, B_pol)
+                
+            Returns:
+                Polarization energy (in kJ/mol)
+            """
+            # Convert from nm to Angstrom for internal calculations
+            positions = positions * 10.0
+            box = box * 10.0
+            
+            Q_local = params["ADMPPmeForce"]["Q_local"][map_atomtype]
+            pol = params["ADMPPmeForce"]["pol"][map_poltype]
+            tholes = params["ADMPPmeForce"]["thole"][map_poltype]
+            # Get B_pol for TT damping (convert from nm^-1 to A^-1)
+            b_pols = params["ADMPPmeForce"]["B_pol"][map_poltype] / 10.0
+            
+            # Use stored induced dipoles if available, otherwise start from zero
+            U_init = getattr(pme_force, 'U_ind', jnp.zeros((n_atoms, 3)))
+            
+            energy_pol = get_energy_pol(
+                positions, box, pairs, Q_local, pol, tholes,
+                self.mScales, self.pScales, self.dScales,
+                U_init=U_init, b_pols=b_pols
+            )
+            
+            return energy_pol
+        
+        return potential_pol_fn
 
 
 _DMFFGenerators["ADMPPmeForce"] = ADMPPmeGenerator

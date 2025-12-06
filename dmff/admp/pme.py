@@ -262,6 +262,63 @@ class ADMPPmeForce:
 
             return get_energy
 
+    def generate_get_energy_pol_only(self):
+        """
+        Generate a function to compute only the polarization energy contribution.
+        This is useful for optimization when you want to adjust polarization parameters (like B_pol) independently.
+        
+        Returns a function that computes only the polarization energy with current B_pol values.
+        Users can call this twice (with and without B_pol) to get the damping contribution.
+        """
+        if not self.lpol:
+            # No polarization, no energy
+            def get_energy_pol(positions, box, pairs, Q_local, pol, tholes, 
+                               mScales, pScales, dScales, U_init=None, b_pols=None):
+                return 0.0
+            return get_energy_pol
+        
+        def get_energy_pol(positions, box, pairs, Q_local, pol, tholes,
+                           mScales, pScales, dScales, U_init=None, b_pols=None):
+            """
+            Compute the polarization energy.
+            
+            This uses the Feynman-Hellman theorem approach: optimize U_ind without tracking gradients,
+            then compute energy with those U_ind values (which does track gradients).
+            
+            Args:
+                positions: atomic positions (in Angstrom)
+                box: simulation box (in Angstrom)
+                pairs: neighbor pairs
+                Q_local: local multipole moments
+                pol: polarizabilities (in A^3)
+                tholes: Thole damping parameters
+                mScales, pScales, dScales: scaling factors
+                U_init: initial induced dipoles (optional, in Angstrom)
+                b_pols: TT damping parameters B_pol (in A^-1)
+                
+            Returns:
+                Polarization energy with the given damping parameters
+            """
+            if U_init is None:
+                U_init = jnp.zeros((self.n_atoms, 3))
+            
+            # Optimize Uind - gradients stop here (Feynman-Hellman)
+            U_ind, _, _ = self.optimize_Uind(
+                positions, box, pairs, Q_local, pol, tholes,
+                mScales, pScales, dScales, U_init=U_init * 10.0,
+                steps_pol=self.steps_pol, b_pols=b_pols
+            )
+            
+            # Compute energy with optimized Uind - gradients flow through this
+            energy = self.energy_fn(
+                positions, box, pairs, Q_local, U_ind,
+                pol, tholes, mScales, pScales, dScales, b_pols
+            )
+            
+            return energy
+        
+        return get_energy_pol
+
     def generate_esp(self):
         @jit_condition()
         def esp_kernel(particle, grid, Qtot, Uind):
@@ -366,6 +423,8 @@ class ADMPPmeForce:
         # generate the force calculator
         self.get_energy = self.generate_get_energy()
         self.get_forces = value_and_grad(self.get_energy)
+        # generate the polarization-only energy calculator (for B_pol optimization)
+        self.get_energy_pol = self.generate_get_energy_pol_only()
         return
 
     def optimize_Uind(
