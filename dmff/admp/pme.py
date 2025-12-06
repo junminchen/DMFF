@@ -846,15 +846,28 @@ def calc_tt_damping_pol(dr, b1, b2):
     
     where br = sqrt(b1 * b2) * dr
     
+    For selective TT damping (e.g., electrolyte systems with Li/Na salts):
+    - Set B_pol > 0 for atoms that should have TT damping (e.g., Li, Na)
+    - Set B_pol = 0 for atoms that should NOT have TT damping
+    - TT damping is only applied when BOTH atoms in a pair have B_pol > 0
+    - When either atom has B_pol = 0, all TT damping factors return 1.0 (no damping)
+    
     Inputs:
         dr: float, distance between particles
-        b1: float, TT damping parameter B for particle i
-        b2: float, TT damping parameter B for particle j
+        b1: float, TT damping parameter B for particle i (B_pol in A^-1)
+        b2: float, TT damping parameter B for particle j (B_pol in A^-1)
         
     Output:
         tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1: TT damping factors for different interactions
+        Returns 1.0 for all factors when either b1 or b2 is zero (no TT damping for that pair)
     """
-    b = jnp.sqrt(b1 * b2)
+    # Check if either atom has B_pol = 0 (selective damping)
+    # If either b1 or b2 is zero, return 1.0 for all damping factors (no TT damping)
+    # This enables selective TT damping for specific atom pairs (e.g., Li/Na containing pairs)
+    b_product = b1 * b2
+    has_both_b = b_product > 1e-10  # True if both atoms have non-zero B_pol
+    
+    b = jnp.sqrt(b_product)
     br = b * dr
     br2 = br * br
     br3 = br2 * br
@@ -868,25 +881,35 @@ def calc_tt_damping_pol(dr, b1, b2):
     
     # TT damping factors: f_n = 1 - exp(-br) * sum_{k=0}^{n} (br)^k / k!
     # For C-Uind (n=2): f_2 = 1 - exp(-br) * (1 + br + br^2/2)
-    tt_c = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
+    tt_c_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
     
     # For D-Uind m=0 (n=3): f_3 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6)
-    tt_d0 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0)
+    tt_d0_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0)
     
     # For D-Uind m=1 (n=2): same as tt_c
-    tt_d1 = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
+    tt_d1_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2)
     
     # For Q-Uind m=0 (n=4): f_4 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6 + br^4/24)
-    tt_q0 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
+    tt_q0_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
     
     # For Q-Uind m=1 (n=3): same as tt_d0
-    tt_q1 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0)
+    tt_q1_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0)
     
     # For O-Uind m=0 (n=5): f_5 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6 + br^4/24 + br^5/120)
-    tt_o0 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0 + br5 / 120.0)
+    tt_o0_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0 + br5 / 120.0)
     
     # For O-Uind m=1 (n=4): same as tt_q0
-    tt_o1 = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
+    tt_o1_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
+    
+    # Apply selective damping: use TT damping only when both atoms have B_pol > 0
+    # When either atom has B_pol = 0, return 1.0 (no TT damping for that pair)
+    tt_c = jnp.where(has_both_b, tt_c_raw, 1.0)
+    tt_d0 = jnp.where(has_both_b, tt_d0_raw, 1.0)
+    tt_d1 = jnp.where(has_both_b, tt_d1_raw, 1.0)
+    tt_q0 = jnp.where(has_both_b, tt_q0_raw, 1.0)
+    tt_q1 = jnp.where(has_both_b, tt_q1_raw, 1.0)
+    tt_o0 = jnp.where(has_both_b, tt_o0_raw, 1.0)
+    tt_o1 = jnp.where(has_both_b, tt_o1_raw, 1.0)
     
     return tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1
 
@@ -899,6 +922,13 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
        ## compute the Thole damping factors for energies
      eUindCoefs is basically the interaction tensor between permanent multipole components and induced dipoles
     Everything should be done in the so called quasi-internal (qi) frame
+    
+    Selective TT Damping for Electrolyte Systems:
+        For electrolyte systems (e.g., with Li/Na salts), TT damping can be selectively
+        applied to pairs containing specific atoms:
+        - Set B_pol > 0 for atoms that should have TT damping (e.g., Li, Na)
+        - Set B_pol = 0 for atoms that should NOT have TT damping (e.g., solvent)
+        - TT damping is only applied when BOTH atoms in a pair have B_pol > 0
 
 
     Inputs:
@@ -920,8 +950,10 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
             int: max L
         b_pol1:
             float: TT damping parameter B for site i (in A^-1), optional
+            Set to 0 for atoms that should not have TT damping
         b_pol2:
             float: TT damping parameter B for site j (in A^-1), optional
+            Set to 0 for atoms that should not have TT damping
         tt_damping_mode:
             int: TT damping mode:
                 0 (TT_DAMPING_MODE_NONE): No TT damping, use Thole only
