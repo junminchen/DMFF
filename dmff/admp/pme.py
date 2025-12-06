@@ -38,6 +38,10 @@ TT_DAMPING_MODE_NONE = 0      # No TT damping (use Thole only)
 TT_DAMPING_MODE_MULTIPLY = 1  # Multiply TT damping with Thole damping
 TT_DAMPING_MODE_REPLACE = 2   # Replace Thole damping with TT damping
 
+# Threshold for determining if B_pol is effectively zero (for selective TT damping)
+# When b1 * b2 < this threshold, TT damping is disabled for that pair
+B_POL_PRODUCT_THRESH = 1e-10
+
 # variables used in soft dipole truncation
 MAX_DIP = 1.0
 TRUNCATION_HARDNESS = 25 # the smaller, the softer
@@ -865,7 +869,7 @@ def calc_tt_damping_pol(dr, b1, b2):
     # If either b1 or b2 is zero, return 1.0 for all damping factors (no TT damping)
     # This enables selective TT damping for specific atom pairs (e.g., Li/Na containing pairs)
     b_product = b1 * b2
-    has_both_b = b_product > 1e-10  # True if both atoms have non-zero B_pol
+    has_both_b = b_product > B_POL_PRODUCT_THRESH  # True if both atoms have non-zero B_pol
     
     b = jnp.sqrt(b_product)
     br = b * dr

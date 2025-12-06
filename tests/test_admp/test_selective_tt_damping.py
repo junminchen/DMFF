@@ -9,7 +9,7 @@ atom types (e.g., Li, Na) in electrolyte systems.
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
-from dmff.admp.pme import calc_tt_damping_pol, TT_DAMPING_MODE_NONE, TT_DAMPING_MODE_MULTIPLY, TT_DAMPING_MODE_REPLACE
+from dmff.admp.pme import calc_tt_damping_pol, TT_DAMPING_MODE_NONE, TT_DAMPING_MODE_MULTIPLY, TT_DAMPING_MODE_REPLACE, B_POL_PRODUCT_THRESH
 
 
 class TestSelectiveTTDamping:
@@ -119,8 +119,11 @@ class TestSelectiveTTDamping:
     def test_very_small_b_pol_treated_as_zero(self):
         """Very small B_pol values (< threshold) should be treated as zero."""
         dr = 3.0
-        b_tiny = 1e-12  # Very small, should be treated as zero
+        # Use a value that when multiplied by a normal B_pol is below the threshold
+        # threshold is B_POL_PRODUCT_THRESH for b1 * b2
         b_normal = 2.0
+        # b_tiny * b_normal should be < B_POL_PRODUCT_THRESH
+        b_tiny = B_POL_PRODUCT_THRESH / b_normal / 10.0  # Well below threshold
         
         tt_factors = calc_tt_damping_pol(dr, b_tiny, b_normal)
         
