@@ -1,15 +1,18 @@
 """
 Test selective TT damping for electrolyte systems (e.g., Li/Na salts).
 
-This test verifies that TT damping is only applied to atom pairs where 
-BOTH atoms have B_pol > 0. This enables selective damping for specific
-atom types (e.g., Li, Na) in electrolyte systems.
+This test verifies that TT damping is applied to atom pairs where 
+AT LEAST ONE atom has B_pol > 0. This enables selective damping for 
+Li/Na containing pairs in electrolyte systems, including:
+- Li-Li, Na-Na, Li-Na pairs (both atoms have B_pol > 0)
+- Li-solvent, Na-solvent pairs (one atom has B_pol > 0)
+Only solvent-solvent pairs (both B_pol = 0) do not have TT damping.
 """
 
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
-from dmff.admp.pme import calc_tt_damping_pol, TT_DAMPING_MODE_NONE, TT_DAMPING_MODE_MULTIPLY, TT_DAMPING_MODE_REPLACE, B_POL_PRODUCT_THRESH
+from dmff.admp.pme import calc_tt_damping_pol, TT_DAMPING_MODE_NONE, TT_DAMPING_MODE_MULTIPLY, TT_DAMPING_MODE_REPLACE, B_POL_THRESH
 
 
 class TestSelectiveTTDamping:
@@ -25,51 +28,56 @@ class TestSelectiveTTDamping:
         for i, name in enumerate(['tt_c', 'tt_d0', 'tt_d1', 'tt_q0', 'tt_q1', 'tt_o0', 'tt_o1']):
             assert float(tt_factors[i]) < 1.0, f"{name} should be < 1.0 when both B_pol > 0"
     
-    def test_one_b_pol_zero(self):
-        """When one atom has B_pol = 0, TT damping should NOT be applied (factors = 1)."""
+    def test_one_b_pol_zero_still_has_damping(self):
+        """When one atom has B_pol = 0, TT damping SHOULD still be applied (factors < 1).
+        
+        This is the key behavior for electrolyte systems: Li-solvent and Na-solvent
+        pairs should have TT damping applied.
+        """
         dr = 3.0  # Angstrom
-        b1, b2 = 2.0, 0.0  # One zero
+        b1, b2 = 2.0, 0.0  # One zero (e.g., Li-solvent pair)
         tt_factors = calc_tt_damping_pol(dr, b1, b2)
         
-        # All TT damping factors should be 1.0 (no damping)
+        # All TT damping factors should be < 1.0 (damping IS applied)
         for i, name in enumerate(['tt_c', 'tt_d0', 'tt_d1', 'tt_q0', 'tt_q1', 'tt_o0', 'tt_o1']):
-            npt.assert_almost_equal(float(tt_factors[i]), 1.0, decimal=10,
-                                    err_msg=f"{name} should be 1.0 when one B_pol = 0")
+            assert float(tt_factors[i]) < 1.0, f"{name} should be < 1.0 when one B_pol > 0 (Li-solvent pair)"
     
-    def test_one_b_pol_zero_reversed(self):
-        """When one atom has B_pol = 0 (reversed order), TT damping should NOT be applied."""
+    def test_one_b_pol_zero_reversed_still_has_damping(self):
+        """When one atom has B_pol = 0 (reversed order), TT damping SHOULD still be applied."""
         dr = 3.0  # Angstrom
-        b1, b2 = 0.0, 2.0  # Reversed order
+        b1, b2 = 0.0, 2.0  # Reversed order (e.g., solvent-Na pair)
         tt_factors = calc_tt_damping_pol(dr, b1, b2)
         
-        # All TT damping factors should be 1.0 (no damping)
+        # All TT damping factors should be < 1.0 (damping IS applied)
         for i, name in enumerate(['tt_c', 'tt_d0', 'tt_d1', 'tt_q0', 'tt_q1', 'tt_o0', 'tt_o1']):
-            npt.assert_almost_equal(float(tt_factors[i]), 1.0, decimal=10,
-                                    err_msg=f"{name} should be 1.0 when one B_pol = 0")
+            assert float(tt_factors[i]) < 1.0, f"{name} should be < 1.0 when one B_pol > 0 (solvent-Na pair)"
     
-    def test_both_b_pol_zero(self):
-        """When both atoms have B_pol = 0, TT damping should NOT be applied."""
+    def test_both_b_pol_zero_no_damping(self):
+        """When both atoms have B_pol = 0, TT damping should NOT be applied (factors = 1).
+        
+        This is for solvent-solvent pairs where no TT damping is needed.
+        """
         dr = 3.0  # Angstrom
-        b1, b2 = 0.0, 0.0  # Both zero
+        b1, b2 = 0.0, 0.0  # Both zero (solvent-solvent pair)
         tt_factors = calc_tt_damping_pol(dr, b1, b2)
         
         # All TT damping factors should be 1.0 (no damping)
         for i, name in enumerate(['tt_c', 'tt_d0', 'tt_d1', 'tt_q0', 'tt_q1', 'tt_o0', 'tt_o1']):
             npt.assert_almost_equal(float(tt_factors[i]), 1.0, decimal=10,
-                                    err_msg=f"{name} should be 1.0 when both B_pol = 0")
+                                    err_msg=f"{name} should be 1.0 when both B_pol = 0 (solvent-solvent pair)")
     
     def test_selective_damping_li_na_case(self):
         """
-        Simulate electrolyte system where only Li/Na containing pairs have TT damping.
+        Simulate electrolyte system where Li/Na containing pairs have TT damping.
         
         In this scenario:
         - Li/Na atoms have B_pol > 0 (e.g., 2.0 A^-1)
         - Solvent atoms have B_pol = 0
         
-        Expected behavior:
+        Expected behavior (TT damping applied to ALL Li/Na containing pairs):
         - Li-Li, Na-Na, Li-Na pairs: TT damping applied (factors < 1)
+        - Li-Solvent, Na-Solvent pairs: TT damping applied (factors < 1)
         - Solvent-Solvent pairs: no TT damping (factors = 1)
-        - Li-Solvent, Na-Solvent pairs: no TT damping (factors = 1)
         """
         dr = 3.0  # Angstrom
         b_li = 2.0  # TT damping parameter for Li
@@ -88,20 +96,18 @@ class TestSelectiveTTDamping:
         tt_li_na = calc_tt_damping_pol(dr, b_li, b_na)
         assert float(tt_li_na[0]) < 1.0, "Li-Na pair should have TT damping"
         
+        # Li-Solvent pair: should have damping (key change!)
+        tt_li_solv = calc_tt_damping_pol(dr, b_li, b_solvent)
+        assert float(tt_li_solv[0]) < 1.0, "Li-Solvent pair should have TT damping"
+        
+        # Na-Solvent pair: should have damping (key change!)
+        tt_na_solv = calc_tt_damping_pol(dr, b_na, b_solvent)
+        assert float(tt_na_solv[0]) < 1.0, "Na-Solvent pair should have TT damping"
+        
         # Solvent-Solvent pair: should NOT have damping
         tt_solv_solv = calc_tt_damping_pol(dr, b_solvent, b_solvent)
         npt.assert_almost_equal(float(tt_solv_solv[0]), 1.0, decimal=10,
                                 err_msg="Solvent-Solvent pair should NOT have TT damping")
-        
-        # Li-Solvent pair: should NOT have damping
-        tt_li_solv = calc_tt_damping_pol(dr, b_li, b_solvent)
-        npt.assert_almost_equal(float(tt_li_solv[0]), 1.0, decimal=10,
-                                err_msg="Li-Solvent pair should NOT have TT damping")
-        
-        # Na-Solvent pair: should NOT have damping
-        tt_na_solv = calc_tt_damping_pol(dr, b_na, b_solvent)
-        npt.assert_almost_equal(float(tt_na_solv[0]), 1.0, decimal=10,
-                                err_msg="Na-Solvent pair should NOT have TT damping")
     
     def test_distance_dependence(self):
         """Verify TT damping factors depend on distance when B_pol > 0."""
@@ -119,18 +125,34 @@ class TestSelectiveTTDamping:
     def test_very_small_b_pol_treated_as_zero(self):
         """Very small B_pol values (< threshold) should be treated as zero."""
         dr = 3.0
-        # Use a value that when multiplied by a normal B_pol is below the threshold
-        # threshold is B_POL_PRODUCT_THRESH for b1 * b2
-        b_normal = 2.0
-        # b_tiny * b_normal should be < B_POL_PRODUCT_THRESH
-        b_tiny = B_POL_PRODUCT_THRESH / b_normal / 10.0  # Well below threshold
+        # Use values smaller than B_POL_THRESH
+        b_tiny = B_POL_THRESH / 10.0  # Well below threshold
         
-        tt_factors = calc_tt_damping_pol(dr, b_tiny, b_normal)
+        # Both tiny -> should be treated as both zero -> no damping
+        tt_factors = calc_tt_damping_pol(dr, b_tiny, b_tiny)
         
-        # Should be treated as if one B_pol is zero -> no damping
+        # Should be treated as if both B_pol are zero -> no damping
         for i, name in enumerate(['tt_c', 'tt_d0', 'tt_d1', 'tt_q0', 'tt_q1', 'tt_o0', 'tt_o1']):
             npt.assert_almost_equal(float(tt_factors[i]), 1.0, decimal=5,
                                     err_msg=f"{name} should be ~1.0 for very small B_pol")
+    
+    def test_ion_solvent_uses_ion_b_pol(self):
+        """When one B_pol is zero, verify the non-zero B_pol value is used correctly."""
+        dr = 3.0
+        b_ion = 2.0
+        b_solvent = 0.0
+        
+        # Ion-solvent pair should use the ion's B_pol value
+        tt_ion_solv = calc_tt_damping_pol(dr, b_ion, b_solvent)
+        
+        # Compare with ion-ion pair using the same B_pol
+        # For ion-ion: b = sqrt(b_ion * b_ion) = b_ion
+        # For ion-solvent: b = max(b_ion, b_solvent) = b_ion
+        tt_ion_ion = calc_tt_damping_pol(dr, b_ion, b_ion)
+        
+        # Both should give the same damping factors since they use the same effective b
+        npt.assert_almost_equal(float(tt_ion_solv[0]), float(tt_ion_ion[0]), decimal=10,
+                                err_msg="Ion-solvent should use ion's B_pol value")
 
 
 if __name__ == "__main__":

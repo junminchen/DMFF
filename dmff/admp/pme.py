@@ -39,8 +39,9 @@ TT_DAMPING_MODE_MULTIPLY = 1  # Multiply TT damping with Thole damping
 TT_DAMPING_MODE_REPLACE = 2   # Replace Thole damping with TT damping
 
 # Threshold for determining if B_pol is effectively zero (for selective TT damping)
-# When b1 * b2 < this threshold, TT damping is disabled for that pair
-B_POL_PRODUCT_THRESH = 1e-10
+# When both b1 and b2 are < this threshold, TT damping is disabled for that pair
+# TT damping is applied when at least one atom has B_pol > threshold
+B_POL_THRESH = 1e-6
 
 # variables used in soft dipole truncation
 MAX_DIP = 1.0
@@ -848,13 +849,16 @@ def calc_tt_damping_pol(dr, b1, b2):
     The TT damping function is:
     f_n(br) = 1 - exp(-br) * sum_{k=0}^{n} (br)^k / k!
     
-    where br = sqrt(b1 * b2) * dr
-    
     For selective TT damping (e.g., electrolyte systems with Li/Na salts):
     - Set B_pol > 0 for atoms that should have TT damping (e.g., Li, Na)
-    - Set B_pol = 0 for atoms that should NOT have TT damping
-    - TT damping is only applied when BOTH atoms in a pair have B_pol > 0
-    - When either atom has B_pol = 0, all TT damping factors return 1.0 (no damping)
+    - Set B_pol = 0 for atoms that should NOT have TT damping (e.g., solvent)
+    - TT damping is applied when AT LEAST ONE atom in a pair has B_pol > 0
+    - This means Li-Li, Na-Na, Li-Na, Li-solvent, Na-solvent pairs all have TT damping
+    - Only solvent-solvent pairs (both B_pol = 0) do not have TT damping
+    
+    For computing br:
+    - If both atoms have B_pol > 0: br = sqrt(b1 * b2) * dr (geometric mean)
+    - If only one atom has B_pol > 0: br = max(b1, b2) * dr (use the non-zero value)
     
     Inputs:
         dr: float, distance between particles
@@ -863,15 +867,21 @@ def calc_tt_damping_pol(dr, b1, b2):
         
     Output:
         tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1: TT damping factors for different interactions
-        Returns 1.0 for all factors when either b1 or b2 is zero (no TT damping for that pair)
+        Returns 1.0 for all factors when both b1 and b2 are zero (no TT damping for that pair)
     """
-    # Check if either atom has B_pol = 0 (selective damping)
-    # If either b1 or b2 is zero, return 1.0 for all damping factors (no TT damping)
-    # This enables selective TT damping for specific atom pairs (e.g., Li/Na containing pairs)
-    b_product = b1 * b2
-    has_both_b = b_product > B_POL_PRODUCT_THRESH  # True if both atoms have non-zero B_pol
+    # Check if at least one atom has B_pol > 0 (selective damping for Li/Na containing pairs)
+    has_b1 = b1 > B_POL_THRESH
+    has_b2 = b2 > B_POL_THRESH
+    has_any_b = jnp.logical_or(has_b1, has_b2)  # True if at least one atom has non-zero B_pol
+    has_both_b = jnp.logical_and(has_b1, has_b2)  # True if both atoms have non-zero B_pol
     
-    b = jnp.sqrt(b_product)
+    # Compute effective b for TT damping:
+    # - If both have B_pol > 0: use geometric mean sqrt(b1 * b2)
+    # - If only one has B_pol > 0: use the non-zero value (max(b1, b2))
+    b_geom = jnp.sqrt(b1 * b2 + 1e-20)  # Add small value to avoid sqrt(0)
+    b_max = jnp.maximum(b1, b2)
+    b = jnp.where(has_both_b, b_geom, b_max)
+    
     br = b * dr
     br2 = br * br
     br3 = br2 * br
@@ -905,15 +915,15 @@ def calc_tt_damping_pol(dr, b1, b2):
     # For O-Uind m=1 (n=4): same as tt_q0
     tt_o1_raw = 1.0 - exp_br * (1.0 + br + 0.5 * br2 + br3 / 6.0 + br4 / 24.0)
     
-    # Apply selective damping: use TT damping only when both atoms have B_pol > 0
-    # When either atom has B_pol = 0, return 1.0 (no TT damping for that pair)
-    tt_c = jnp.where(has_both_b, tt_c_raw, 1.0)
-    tt_d0 = jnp.where(has_both_b, tt_d0_raw, 1.0)
-    tt_d1 = jnp.where(has_both_b, tt_d1_raw, 1.0)
-    tt_q0 = jnp.where(has_both_b, tt_q0_raw, 1.0)
-    tt_q1 = jnp.where(has_both_b, tt_q1_raw, 1.0)
-    tt_o0 = jnp.where(has_both_b, tt_o0_raw, 1.0)
-    tt_o1 = jnp.where(has_both_b, tt_o1_raw, 1.0)
+    # Apply selective damping: use TT damping when at least one atom has B_pol > 0
+    # Only when both atoms have B_pol = 0, return 1.0 (no TT damping for that pair)
+    tt_c = jnp.where(has_any_b, tt_c_raw, 1.0)
+    tt_d0 = jnp.where(has_any_b, tt_d0_raw, 1.0)
+    tt_d1 = jnp.where(has_any_b, tt_d1_raw, 1.0)
+    tt_q0 = jnp.where(has_any_b, tt_q0_raw, 1.0)
+    tt_q1 = jnp.where(has_any_b, tt_q1_raw, 1.0)
+    tt_o0 = jnp.where(has_any_b, tt_o0_raw, 1.0)
+    tt_o1 = jnp.where(has_any_b, tt_o1_raw, 1.0)
     
     return tt_c, tt_d0, tt_d1, tt_q0, tt_q1, tt_o0, tt_o1
 
@@ -932,7 +942,9 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
         applied to pairs containing specific atoms:
         - Set B_pol > 0 for atoms that should have TT damping (e.g., Li, Na)
         - Set B_pol = 0 for atoms that should NOT have TT damping (e.g., solvent)
-        - TT damping is only applied when BOTH atoms in a pair have B_pol > 0
+        - TT damping is applied when AT LEAST ONE atom in a pair has B_pol > 0
+        - This means Li-Li, Na-Na, Li-Na, Li-solvent, Na-solvent pairs all have TT damping
+        - Only solvent-solvent pairs (both B_pol = 0) do not have TT damping
 
 
     Inputs:
