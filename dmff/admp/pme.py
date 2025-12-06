@@ -300,8 +300,11 @@ class ADMPPmeForce:
                 Polarization energy with the given damping parameters
             """
             if U_init is None:
-                U_init = jnp.zeros((self.n_atoms, 3))
+                # Infer number of atoms from positions
+                n_atoms = positions.shape[0]
+                U_init = jnp.zeros((n_atoms, 3))
             
+            # Unit conversion: nm to Angstrom (multiply by 10.0)
             # Optimize Uind - gradients stop here (Feynman-Hellman)
             U_ind, _, _ = self.optimize_Uind(
                 positions, box, pairs, Q_local, pol, tholes,

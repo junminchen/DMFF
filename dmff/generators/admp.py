@@ -1391,7 +1391,7 @@ class ADMPPmeGenerator:
         self.pme_force = pme_force
         topdata._meta[self.name+"_map_atomtype"] = map_atomtype
         topdata._meta[self.name+"_map_poltype"] = map_poltype
-        # Store for later use in getPotentialDamping
+        # Store for later use in getPotentialPol
         self._map_atomtype_stored = map_atomtype
         self._map_poltype_stored = map_poltype
         self._n_atoms_stored = n_atoms
@@ -1474,8 +1474,10 @@ class ADMPPmeGenerator:
         
         # Get stored metadata from when createPotential was called
         # These are instance variables set during createPotential
-        if not hasattr(self, '_map_atomtype_stored') or not hasattr(self, '_map_poltype_stored'):
-            raise ValueError("Map atomtype/poltype not found. Make sure createPotential was called first.")
+        if not hasattr(self, '_map_atomtype_stored'):
+            raise ValueError("Map atomtype not found. Make sure createPotential was called first.")
+        if not hasattr(self, '_map_poltype_stored'):
+            raise ValueError("Map poltype not found. Make sure createPotential was called first.")
         
         map_atomtype = self._map_atomtype_stored
         map_poltype = self._map_poltype_stored
@@ -1508,6 +1510,7 @@ class ADMPPmeGenerator:
             b_pols = params["ADMPPmeForce"]["B_pol"][map_poltype] / 10.0
             
             # Use stored induced dipoles if available, otherwise start from zero
+            # (U_ind is stored in Angstrom units internally)
             U_init = getattr(pme_force, 'U_ind', jnp.zeros((n_atoms, 3)))
             
             energy_pol = get_energy_pol(
