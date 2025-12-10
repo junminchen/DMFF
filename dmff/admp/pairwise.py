@@ -106,6 +106,8 @@ def generate_pairwise_interaction(pair_int_kernel, static_args):
 @vmap
 @jit_condition(static_argnums={})
 def TT_damping_qq_c6_kernel(dr, m, ai, aj, bi, bj, qi, qj, ci, cj):
+    # Add regularization
+    dr = jnp.maximum(dr, 0.05)
     a = jnp.sqrt(ai * aj)
     b = jnp.sqrt(bi * bj)
     c = ci * cj
@@ -127,6 +129,8 @@ def TT_damping_qq_c6_kernel(dr, m, ai, aj, bi, bj, qi, qj, ci, cj):
 @vmap
 @jit_condition(static_argnums={})
 def TT_damping_qq_kernel(dr, m, bi, bj, qi, qj):
+    # Add regularization
+    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
     q = qi * qj
     br = b * dr
@@ -144,6 +148,8 @@ def slater_disp_damping_kernel(dr, m, bi, bj, c6i, c6j, c8i, c8j, c10i, c10j):
     x = Br - \frac{2*(Br)^2 + 3Br}{(Br)^2 + 3*Br + 3}
     see jctc 12 3851
     '''
+    # Add regularization
+    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
     c6 = c6i * c6j
     c8 = c8i * c8j
