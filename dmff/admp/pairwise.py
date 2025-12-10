@@ -176,6 +176,8 @@ def slater_sr_hc_kernel(dr, m, ai, aj, bi, bj):
     Slater-ISA type short range terms
     see jctc 12 3851
     '''
+    # Add regularization
+    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
     a = jnp.abs(ai * aj)
     br = b * dr
@@ -200,6 +202,8 @@ def slater_sr_kernel(dr, m, ai, aj, bi, bj):
     Slater-ISA type short range terms
     see jctc 12 3851
     '''
+    # Add regularization
+    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
     a = jnp.abs(ai * aj)
     br = b * dr
