@@ -1,0 +1,5 @@
+from .pme import (
+    TT_DAMPING_MODE_NONE,
+    TT_DAMPING_MODE_MULTIPLY,
+    TT_DAMPING_MODE_REPLACE,
+)

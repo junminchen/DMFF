@@ -2,7 +2,13 @@ from ..api.topology import DMFFTopology
 from ..api.paramset import ParamSet
 from ..api.hamiltonian import _DMFFGenerators
 from ..utils import DMFFException, isinstance_jnp
-from ..admp.pme import setup_ewald_parameters
+from ..admp.pme import (
+    setup_ewald_parameters,
+    ADMPPmeForce,
+    TT_DAMPING_MODE_NONE,
+    TT_DAMPING_MODE_MULTIPLY,
+    TT_DAMPING_MODE_REPLACE,
+)
 import numpy as np
 import jax.numpy as jnp
 import openmm.app as app
@@ -17,7 +23,6 @@ from ..admp.pairwise import (
     slater_sr_hc_kernel,  ## added Hard Core Potential
     TT_damping_qq_kernel,
 )
-from ..admp.pme import ADMPPmeForce
 
 
 class ADMPDispGenerator:
@@ -929,6 +934,16 @@ class ADMPPmeGenerator:
             self.lpol = True
         else:
             self.lpol = False
+            
+        # Parse TT damping mode for polarization from meta attributes
+        # ttDampingMode: "none", "multiply", or "replace"
+        tt_mode_str = self.ffinfo["Forces"][self.name]["meta"].get("ttDampingMode", "none").lower()
+        if tt_mode_str == "multiply":
+            self.tt_damping_mode = TT_DAMPING_MODE_MULTIPLY
+        elif tt_mode_str == "replace":
+            self.tt_damping_mode = TT_DAMPING_MODE_REPLACE
+        else:
+            self.tt_damping_mode = TT_DAMPING_MODE_NONE
 
         # get atom types
         multipole_nodes = [
@@ -1009,6 +1024,7 @@ class ADMPPmeGenerator:
         if self.lpol:
             pol = []
             thole = []
+            b_pol = []  # TT damping parameter B for polarization
             polarizability_masks = []
             for nnode, node in enumerate(polarize_nodes):
                 self.polarize_types.append(node["attrib"][self.key_type])
@@ -1019,6 +1035,8 @@ class ADMPPmeGenerator:
                     (polarizabilityXX + polarizabilityYY + polarizabilityZZ) / 3.0
                 )
                 thole.append(float(node["attrib"]["thole"]))
+                # Parse B_pol for TT damping (optional, default 0.0)
+                b_pol.append(float(node["attrib"].get("B_pol", "0.0")))
                 mask = 1.0
                 if (
                     "mask" in node["attrib"]
@@ -1034,18 +1052,27 @@ class ADMPPmeGenerator:
             paramset.addParameter(
                 jnp.array(thole), "thole", field=self.name, mask=polarizability_masks
             )
+            # Add B_pol parameter (unit: nm^-1, will be converted to A^-1 in potential function)
+            paramset.addParameter(
+                jnp.array(b_pol), "B_pol", field=self.name, mask=polarizability_masks
+            )
 
         n_atoms = len(self.multipole_types)
 
         # assert n_atoms == len(polarizabilityXX), "Number of polarizabilityXX does not match number of atoms!"
 
-        # map atom multipole moments
+        # map atom multipole moments (in Cartesian representation)
+        # Note: n_mtps is the number of Cartesian components
         if self.lmax == 0:
-            n_mtps = 1
+            n_mtps = 1  # monopole
         elif self.lmax == 1:
-            n_mtps = 4
+            n_mtps = 4  # monopole + dipole (1+3)
         elif self.lmax == 2:
-            n_mtps = 10
+            n_mtps = 10  # monopole + dipole + quadrupole (1+3+6)
+        elif self.lmax == 3:
+            n_mtps = 20  # monopole + dipole + quadrupole + octupole (1+3+6+10)
+        else:
+            raise ValueError(f"Invalid lmax: {self.lmax}. Valid values are 0, 1, 2, 3")
         Q = np.zeros((n_atoms, n_mtps))
 
         # TDDO: unit conversion
@@ -1100,6 +1127,7 @@ class ADMPPmeGenerator:
                 node["attrib"]["polarizabilityYY"] = paramset[self.name]["pol"][n_pol] * 0.001
                 node["attrib"]["polarizabilityZZ"] = paramset[self.name]["pol"][n_pol] * 0.001
                 node["attrib"]["thole"] = paramset[self.name]["thole"][n_pol]
+                node["attrib"]["B_pol"] = paramset[self.name]["B_pol"][n_pol]
                 if polar_masks[n_pol] < 0.999:
                     node["attrib"]["mask"] = "true"
                 n_pol += 1
@@ -1357,11 +1385,16 @@ class ADMPPmeGenerator:
             self.lpol,
             lpme,
             self.step_pol,
-            has_aux
+            has_aux,
+            self.tt_damping_mode,
         )
         self.pme_force = pme_force
         topdata._meta[self.name+"_map_atomtype"] = map_atomtype
         topdata._meta[self.name+"_map_poltype"] = map_poltype
+        # Store for later use in getPotentialPol
+        self._map_atomtype_stored = map_atomtype
+        self._map_poltype_stored = map_poltype
+        self._n_atoms_stored = n_atoms
 
         if "has_aux" in kwargs and kwargs["has_aux"]:
             has_aux = True
@@ -1375,26 +1408,28 @@ class ADMPPmeGenerator:
             if self.lpol:
                 pol = params["ADMPPmeForce"]["pol"][map_poltype]
                 tholes = params["ADMPPmeForce"]["thole"][map_poltype]
+                # Get B_pol for TT damping (convert from nm^-1 to A^-1)
+                b_pols = params["ADMPPmeForce"]["B_pol"][map_poltype] / 10.0
 
                 if has_aux:
                     if aux is not None:
                         energy, aux = pme_force.get_energy(
                             positions, box, pairs, Q_local, pol, tholes,
                             self.mScales, self.pScales, self.dScales,
-                            U_init = aux["U_ind"], aux = aux
+                            U_init = aux["U_ind"], aux = aux, b_pols=b_pols
                         )
                     else:
                         energy, aux = pme_force.get_energy(
                             positions, box, pairs, Q_local, pol, tholes, 
                             self.mScales, self.pScales, self.dScales, 
-                            U_init=jnp.zeros((n_atoms,3)), aux={}
+                            U_init=jnp.zeros((n_atoms,3)), aux={}, b_pols=b_pols
                         )
                     return energy, aux
                 else:
                     energy = pme_force.get_energy(
                         positions, box, pairs, Q_local, pol, tholes,
                         self.mScales, self.pScales, self.dScales,
-                        U_init = pme_force.U_ind
+                        U_init = pme_force.U_ind, b_pols=b_pols
                     )
                     return energy
             else:
@@ -1411,6 +1446,82 @@ class ADMPPmeGenerator:
 
     def getJaxPotential(self):
         return self._jaxPotential
+
+    def getPotentialPol(self):
+        """
+        Get a potential function that computes only the polarization energy.
+        This is useful for optimization when you want to adjust polarization parameters (B_pol, etc.) independently.
+        
+        Must be called after createPotential().
+        
+        Usage:
+            To get damping contribution, you can compute:
+                E_damping = generator.getPotentialPol()(pos, box, pairs, params_with_Bpol) - 
+                           generator.getPotentialPol()(pos, box, pairs, params_with_Bpol_zero)
+        
+        Returns:
+            A function that takes (positions, box, pairs, params) and returns the polarization energy.
+        """
+        if not self.lpol:
+            # Non-polarizable force field has no polarization energy
+            def potential_pol_fn(positions, box, pairs, params):
+                return 0.0
+            return potential_pol_fn
+        
+        # Get the pme_force instance
+        if self.pme_force is None:
+            raise ValueError("Must call createPotential first to initialize pme_force")
+        
+        # Get stored metadata from when createPotential was called
+        # These are instance variables set during createPotential
+        if not hasattr(self, '_map_atomtype_stored'):
+            raise ValueError("Map atomtype not found. Make sure createPotential was called first.")
+        if not hasattr(self, '_map_poltype_stored'):
+            raise ValueError("Map poltype not found. Make sure createPotential was called first.")
+        
+        map_atomtype = self._map_atomtype_stored
+        map_poltype = self._map_poltype_stored
+        n_atoms = len(map_atomtype)
+        
+        pme_force = self.pme_force
+        get_energy_pol = pme_force.get_energy_pol
+        
+        def potential_pol_fn(positions, box, pairs, params):
+            """
+            Compute the polarization energy.
+            
+            Args:
+                positions: atomic positions (in nm)
+                box: simulation box (in nm)
+                pairs: neighbor pairs
+                params: parameter set containing polarization parameters (pol, tholes, B_pol)
+                
+            Returns:
+                Polarization energy (in kJ/mol)
+            """
+            # Convert from nm to Angstrom for internal calculations
+            positions = positions * 10.0
+            box = box * 10.0
+            
+            Q_local = params["ADMPPmeForce"]["Q_local"][map_atomtype]
+            pol = params["ADMPPmeForce"]["pol"][map_poltype]
+            tholes = params["ADMPPmeForce"]["thole"][map_poltype]
+            # Get B_pol for TT damping (convert from nm^-1 to A^-1)
+            b_pols = params["ADMPPmeForce"]["B_pol"][map_poltype] / 10.0
+            
+            # Use stored induced dipoles if available, otherwise start from zero
+            # (U_ind is stored in Angstrom units internally)
+            U_init = getattr(pme_force, 'U_ind', jnp.zeros((n_atoms, 3)))
+            
+            energy_pol = get_energy_pol(
+                positions, box, pairs, Q_local, pol, tholes,
+                self.mScales, self.pScales, self.dScales,
+                U_init=U_init, b_pols=b_pols
+            )
+            
+            return energy_pol
+        
+        return potential_pol_fn
 
 
 _DMFFGenerators["ADMPPmeForce"] = ADMPPmeGenerator
