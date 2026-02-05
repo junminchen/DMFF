@@ -30,15 +30,17 @@ from .pairwise import (
 )
 
 
+# DEFAULT_THOLE_WIDTH = 5.0
 DEFAULT_THOLE_WIDTH = 5.0
 
-# Damping type constants for polarization
-POL_DAMP_THOLE = 0  # Thole damping only (default)
-POL_DAMP_TT = 1     # Tang-Toennies damping only
-POL_DAMP_THOLE_TT = 2  # Thole * TT damping (multiplicative)
-
-# Maximum value for br in TT damping to avoid overflow in exp(-br)
-MAX_BR_TT_DAMPING = 50.0
+# variables used in soft dipole truncation
+MAX_DIP = 1.0
+TRUNCATION_HARDNESS = 25 # the smaller, the softer
+def SOFT_TRUNCATION(x):
+    x2 = x * x
+    x_abs = jnp.sqrt(x2 + 1e-6)
+    val = -1/TRUNCATION_HARDNESS * jnp.log(1 + jnp.exp(-TRUNCATION_HARDNESS*(x_abs-MAX_DIP))) + MAX_DIP
+    return val * x/x_abs
 
 
 class ADMPPmeForce:
@@ -74,7 +76,7 @@ class ADMPPmeForce:
             rc:
                 float: cutoff distance
             ethresh:
-                float: pme energy threshold
+                float: (empirical) average relative error in the PME forces
             lmax:
                 int: max L for multipoles
             lpol:
@@ -226,6 +228,7 @@ class ADMPPmeForce:
                     steps_pol=self.steps_pol,
                     B_pol=B_pol,
                 )  # nm to angstrom
+                self.U_ind = U_ind
                 # here we rely on Feynman-Hellman theorem, drop the term dV/dU*dU/dr !
                 # self.U_ind = jax.lax.stop_gradient(U_ind)
                 energy = energy_fn(
@@ -438,6 +441,8 @@ class ADMPPmeForce:
                     B_pol,
                 )
                 U = U - field * pol[:, jnp.newaxis] / DIELECTRIC
+                # soft truncation: stop polarization catastrophe
+                U = SOFT_TRUNCATION(U)
                 return U
 
             U = jax.lax.fori_loop(0, steps_pol, update_U, U)
@@ -463,7 +468,7 @@ def setup_ewald_parameters(
     rc: float
         The cutoff distance, in nm
     ethresh: float
-        Required energy precision, in kJ/mol
+        (Empirical) average relative error in the PME forces
     box: ndarray, optional
         3*3 matrix, box size, a, b, c arranged in rows, used in openmm method
     spacing: float, optional
@@ -738,7 +743,35 @@ def calc_e_perm(dr, mscales, kappa, lmax=2):
         qq_m1 = 0
         qq_m2 = 0
 
-    return cc, cd, dd_m0, dd_m1, cq, dq_m0, dq_m1, qq_m0, qq_m1, qq_m2
+    if lmax >= 3:
+        ## C-O
+        co = rInvVec[4] * (-mscales - bVec[3] - (4/15)*alphaRVec[5]*X)
+        ## D-O
+        do_m0 = -4.0 * rInvVec[5] * (mscales + bVec[4] + (2/15)*alphaRVec[7]*X)
+        do_m1 = jnp.sqrt(6) * (mscales + bVec[4]) * rInvVec[5]
+        ## Q-O
+        qo_m0 = rInvVec[6] * (-10.0 * (mscales + bVec[4]) - (8/45) * (3.0 + 2.0*alphaRVec[2])*alphaRVec[7]*X)
+        qo_m1 = 5.0 * jnp.sqrt(2) * rInvVec[6] * (mscales + bVec[4] + (8/75)*alphaRVec[7]*X)
+        qo_m2 = -jnp.sqrt(5) * (mscales + bVec[4]) * rInvVec[6] 
+        ## O-O
+        oo_m0 = rInvVec[7] * (-20.0*(mscales+bVec[5]) - (8/1575)*(15.0+28.0*alphaRVec[2] + 28.0*alphaRVec[4])*alphaRVec[7]*X)
+        oo_m1 = rInvVec[7] * (15.0*(mscales+bVec[5]) + (8/525)*(-5.0 + 28.0*alphaRVec[2])*alphaRVec[7]*X)
+        oo_m2 = rInvVec[7] * (-6.0*(mscales+bVec[5]) - (8/105)*alphaRVec[7]*X)
+        oo_m3 = rInvVec[7] * ((mscales+bVec[5]) - (8/105)*alphaRVec[7]*X)
+    else:
+        co = 0
+        do_m0 = 0
+        do_m1 = 0
+        qo_m0 = 0
+        qo_m1 = 0
+        qo_m2 = 0
+        oo_m0 = 0
+        oo_m1 = 0
+        oo_m2 = 0
+        oo_m3 = 0
+
+
+    return cc, cd, dd_m0, dd_m1, cq, dq_m0, dq_m1, qq_m0, qq_m1, qq_m2, co, do_m0, do_m1, qo_m0, qo_m1, qo_m2, oo_m0, oo_m1, oo_m2, oo_m3
 
 
 @jit_condition(static_argnums=())
@@ -903,32 +936,9 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
     thole_d1 = 1.0 - expau * (1.0 + au + 0.5 * au2)
     thole_q0 = 1.0 - expau * (1.0 + au + 0.5 * au2 + au3 / 6.0 + au4 / 18.0)
     thole_q1 = 1.0 - expau * (1.0 + au + 0.5 * au2 + au3 / 6.0)
-
-    # Apply TT damping if requested
-    if damp_type == POL_DAMP_TT:
-        # TT damping only - replace Thole damping
-        tt_c, tt_d0, tt_d1, tt_q0, tt_q1 = compute_tt_damping_pol(dr, b1, b2)
-        damp_c = tt_c
-        damp_d0 = tt_d0
-        damp_d1 = tt_d1
-        damp_q0 = tt_q0
-        damp_q1 = tt_q1
-    elif damp_type == POL_DAMP_THOLE_TT:
-        # Thole * TT damping (multiplicative)
-        tt_c, tt_d0, tt_d1, tt_q0, tt_q1 = compute_tt_damping_pol(dr, b1, b2)
-        damp_c = thole_c * tt_c
-        damp_d0 = thole_d0 * tt_d0
-        damp_d1 = thole_d1 * tt_d1
-        damp_q0 = thole_q0 * tt_q0
-        damp_q1 = thole_q1 * tt_q1
-    else:
-        # Default: Thole damping only
-        damp_c = thole_c
-        damp_d0 = thole_d0
-        damp_d1 = thole_d1
-        damp_q0 = thole_q0
-        damp_q1 = thole_q1
-
+    thole_o0  = 1.0 - expau*(1.0 + au + 0.5*au2 + au3/6.0 + au4/24.0 + au5/120.0)
+    thole_o1  = 1.0 - expau*(1.0 + au + 0.5*au2 + au3/6.0 + au4/30.0)
+    
     # copied from calc_e_perm
     # be aware of unit and dimension !!
     rInv = 1 / dr
@@ -981,6 +991,24 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
     else:
         udq_m0 = 0.0
         udq_m1 = 0.0
+        
+    if lmax >= 3:
+        ## Uind-O
+        udo_m0 = (
+            -8.0 * 
+            rInvVec[5] * 
+            (pscales * thole_o0 + bVec[4] + (2/15)*alphaRVec[7]*X)
+        )
+        udo_m1 = (
+            2.0 * 
+            jnp.sqrt(6) * 
+            (pscales * thole_o1+bVec[4]) * 
+            rInvVec[5]
+        )
+    else:
+        udo_m0 = 0.0
+        udo_m1 = 0.0 
+    
     ## Uind-Uind
     udud_m0 = (
         -2.0
@@ -988,8 +1016,8 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2,
         * rInvVec[3]
         * (3.0 * (dscales * damp_d0 + bVec[3]) + alphaRVec[3] * X)
     )
-    udud_m1 = rInvVec[3] * (dscales * damp_d1 + bVec[3] - 2.0 / 3.0 * alphaRVec[3] * X)
-    return cud, dud_m0, dud_m1, udq_m0, udq_m1, udud_m0, udud_m1
+    udud_m1 = rInvVec[3] * (dscales * thole_d1 + bVec[3] - 2.0 / 3.0 * alphaRVec[3] * X)
+    return cud, dud_m0, dud_m1, udq_m0, udq_m1, udo_m0, udo_m1, udud_m0, udud_m1
 
 
 @partial(vmap, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None), out_axes=0)
@@ -1057,12 +1085,12 @@ def pme_real_kernel(
         energy:
             float, realspace interaction energy between the sites
     """
-    cc, cd, dd_m0, dd_m1, cq, dq_m0, dq_m1, qq_m0, qq_m1, qq_m2 = calc_e_perm(
+    cc, cd, dd_m0, dd_m1, cq, dq_m0, dq_m1, qq_m0, qq_m1, qq_m2, co, do_m0, do_m1, qo_m0, qo_m1, qo_m2, oo_m0, oo_m1, oo_m2, oo_m3 = calc_e_perm(
         dr, mscales, kappa, lmax
     )
     if lpol:
-        cud, dud_m0, dud_m1, udq_m0, udq_m1, udud_m0, udud_m1 = calc_e_ind(
-            dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax, b1, b2, damp_type
+        cud, dud_m0, dud_m1, udq_m0, udq_m1, udo_m0, udo_m1, udud_m0, udud_m1 = calc_e_ind(
+            dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax
         )
 
     Vij0 = cc * qiQI[0]
@@ -1138,6 +1166,83 @@ def pme_real_kernel(
             Vij5 -= udq_m1 * qiUindI[1]
             Vij6 -= udq_m1 * qiUindI[2]
 
+    if lmax >= 3:
+        # C-O
+        Vij0 = Vij0 + co*qiQI[9]
+        Vji9 = co*qiQJ[0]
+        Vij9 = -co*qiQI[0]
+        Vji0 = Vji0 - co*qiQJ[9]
+        # D-O m0
+        Vij1 += do_m0*qiQI[9]
+        Vji9 += do_m0*qiQJ[1]
+        # O-D m0
+        Vij9 += do_m0*qiQI[1]
+        Vji1 += do_m0*qiQJ[9]
+        # D-O m1
+        Vij2 = Vij2 + do_m1*qiQI[10]
+        Vji10 = do_m1*qiQJ[2]
+        Vij3 += do_m1*qiQI[11]
+        Vji11 = do_m1*qiQJ[3]
+        # O-D m1
+        Vij10 = do_m1*qiQI[2]
+        Vji2 += do_m1*qiQJ[10]
+        Vij11 = do_m1*qiQI[3]
+        Vji3 += do_m1*qiQJ[11]
+        # Q-O m0
+        Vij4 += qo_m0*qiQI[9]
+        Vji9 += qo_m0*qiQJ[4]
+        # O-Q m0
+        Vij9 -= qo_m0*qiQI[4]
+        Vji4 -= qo_m0*qiQJ[9]
+        # Q-O m1
+        Vij5 += qo_m1*qiQI[10]
+        Vji10 += qo_m1*qiQJ[5]
+        Vij6 += qo_m1*qiQI[11]
+        Vji11 += qo_m1*qiQJ[6]
+        # O-Q m1
+        Vij10 -= qo_m1*qiQI[5]
+        Vji5  -= qo_m1*qiQJ[10]
+        Vij11 -= qo_m1*qiQI[6]
+        Vji6  -= qo_m1*qiQJ[11]
+        # Q-O m2
+        Vij7 += qo_m2*qiQI[12]
+        Vji12 = qo_m2*qiQJ[7]
+        Vij8 += qo_m2*qiQI[13]
+        Vji13 = qo_m2*qiQJ[8]
+        # O-Q m2
+        Vij12 = -qo_m2*qiQI[7]
+        Vji7 -=  qo_m2*qiQJ[12]
+        Vij13 = -qo_m2*qiQI[8]
+        Vji8 -=  qo_m2*qiQJ[13]
+        # O-O m0
+        Vij9 += oo_m0*qiQI[9]
+        Vji9 += oo_m0*qiQJ[9]
+        # O-O m1
+        Vij10 += oo_m1*qiQI[10]
+        Vji10 += oo_m1*qiQJ[10]
+        Vij11 += oo_m1*qiQI[11]
+        Vji11 += oo_m1*qiQJ[11]
+        # O-O m2
+        Vij12 += oo_m2*qiQI[12]
+        Vji12 += oo_m2*qiQJ[12]
+        Vij13 += oo_m2*qiQI[13]
+        Vji13 += oo_m2*qiQJ[13]
+        # O-O m3
+        Vij14 = oo_m3*qiQI[14]
+        Vji14 = oo_m3*qiQJ[14]
+        Vij15 = oo_m3*qiQI[15]
+        Vji15 = oo_m3*qiQJ[15]
+        if lpol:
+            # m = 0
+            Vji9 += udo_m0*qiUindJ[0]
+            Vij9 += udo_m0*qiUindI[0]
+            # m = 1
+            Vji10 += udo_m1*qiUindJ[1]
+            Vji11 += udo_m1*qiUindJ[2]
+            
+            Vij10 += udo_m1*qiUindI[1]
+            Vij11 += udo_m1*qiUindI[2]            
+
     # Uind - Uind
     if lpol:
         Vij1dd = udud_m0 * qiUindI[0]
@@ -1158,6 +1263,9 @@ def pme_real_kernel(
     elif lmax == 2:
         Vij = jnp.stack((Vij0, Vij1, Vij2, Vij3, Vij4, Vij5, Vij6, Vij7, Vij8))
         Vji = jnp.stack((Vji0, Vji1, Vji2, Vji3, Vji4, Vji5, Vji6, Vji7, Vji8))
+    elif lmax == 3:
+        Vij = jnp.stack((Vij0, Vij1, Vij2, Vij3, Vij4, Vij5, Vij6, Vij7, Vij8, Vij9, Vij10, Vij11, Vij12, Vij13, Vij14, Vij15))
+        Vji = jnp.stack((Vji0, Vji1, Vji2, Vji3, Vji4, Vji5, Vji6, Vji7, Vji8, Vji9, Vji10, Vji11, Vji12, Vji13, Vji14, Vji15))
     else:
         raise ValueError(f"Invalid lmax {lmax}. Valid values are 0, 1, 2")
 
@@ -1231,7 +1339,7 @@ def pme_real(
     """
     pairs = pairs.at[:, :2].set(regularize_pairs(pairs[:, :2]))
     buffer_scales = pair_buffer_scales(pairs[:, :2])
-    box_inv = jnp.linalg.inv(box)
+    box_inv = jnp.linalg.inv(box + jnp.eye(3) * 1e-36)
     r1 = distribute_v3(positions, pairs[:, 0])
     r2 = distribute_v3(positions, pairs[:, 1])
     Q_extendi = distribute_multipoles(Q_global, pairs[:, 0])
@@ -1350,17 +1458,25 @@ def pme_self(Q_h, kappa, lmax=2):
             2,
         ]
         * 5
+        + [
+            3,
+        ]
+        * 7
     )[:n_harms]
     l_fac2 = np.array(
         [1]
         + [
-            3,
+            3 * 1,
         ]
         * 3
         + [
-            15,
+            5 * 3 * 1,
         ]
         * 5
+        + [
+            7 * 5 * 3 * 1,
+        ]
+        * 7
     )[:n_harms]
     factor = kappa / np.sqrt(np.pi) * (2 * kappa**2) ** l_list / l_fac2
     return -jnp.sum(factor[np.newaxis] * Q_h**2) * DIELECTRIC

@@ -13,7 +13,8 @@ from ..admp.pairwise import (
     TT_damping_qq_c6_kernel,
     generate_pairwise_interaction,
     slater_disp_damping_kernel,
-    slater_sr_kernel,
+    slater_sr_kernel, ## no Hard Core Potential
+    slater_sr_hc_kernel,  ## added Hard Core Potential
     TT_damping_qq_kernel,
 )
 from ..admp.pme import ADMPPmeForce
@@ -759,20 +760,21 @@ class SlaterExGenerator:
 
         topdata._meta[self.name+"_map_atomtype"] = map_atomtype
 
-        pot_fn_sr = generate_pairwise_interaction(slater_sr_kernel, static_args={})
+        pot_fn_sr = generate_pairwise_interaction(slater_sr_hc_kernel, static_args={}) 
+        #slater_ex_sr_kernel: added Hard Core Potential
 
         has_aux = False
         if "has_aux" in kwargs and kwargs["has_aux"]:
             has_aux = True
 
-        def potential_fn(positions, box, pairs, params, aux=None):
+        def potential_fn(positions, box, pairs, params, aux=None): 
             positions = positions * 10
             box = box * 10
             params = params[self.name]
             a_list = params["A"][map_atomtype]
             b_list = params["B"][map_atomtype] / 10  # nm^-1 to A^-1
 
-            energy = pot_fn_sr(positions, box, pairs, self.mScales, a_list, b_list)
+            energy = pot_fn_sr(positions, box, pairs, self.mScales, a_list, b_list) 
             if has_aux:
                 return energy, aux
             else:
@@ -790,6 +792,7 @@ class SlaterExGenerator:
 _DMFFGenerators["SlaterExForce"] = SlaterExGenerator
 
 
+
 # Here are all the short range "charge penetration" terms
 # They all have the exchange form with minus sign
 class SlaterSrEsGenerator(SlaterExGenerator):
@@ -798,7 +801,6 @@ class SlaterSrEsGenerator(SlaterExGenerator):
             super().__init__(ffinfo, paramset, default_name="SlaterSrEsForce")
         else:
             super().__init__(ffinfo, paramset, default_name=default_name)
-
     def createPotential(
         self, topdata: DMFFTopology, nonbondedMethod, nonbondedCutoff, **kwargs
     ):
@@ -812,14 +814,14 @@ class SlaterSrEsGenerator(SlaterExGenerator):
 
         topdata._meta[self.name+"_map_atomtype"] = map_atomtype
 
-        pot_fn_sr = generate_pairwise_interaction(slater_sr_kernel,
-                                                  static_args={})
+        pot_fn_sr = generate_pairwise_interaction(slater_sr_kernel, static_args={}) 
+        ## slater_sr_others_kernel: no Hard Core Potential 
 
         has_aux = False
         if "has_aux" in kwargs and kwargs["has_aux"]:
             has_aux = True
 
-        def potential_fn(positions, box, pairs, params, aux=None):
+        def potential_fn(positions, box, pairs, params, aux=None): 
             positions = positions * 10
             box = box * 10
             params = params[self.name]

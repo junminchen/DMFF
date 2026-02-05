@@ -19,10 +19,10 @@ jobs:
       - name: Install Dependencies
         run: |
           source $CONDA/bin/activate
-          conda create -n dmff -y python=${{ matrix.python-version }} numpy openmm==7.7.0 pytest rdkit openbabel mdtraj ambertools -c conda-forge
+          conda create -n dmff -y python=${{ matrix.python-version }} numpy openmm==7.7.0 pytest rdkit openbabel mdtraj ambertools -c conda-forge 
           conda activate dmff
           pip install --upgrade pip
-          pip install jax jaxlib jaxopt networkx parmed pymbar==4.0.1 optax tqdm
+          pip install jax jaxlib jaxopt networkx parmed pymbar==4.0.1 optax tqdm ase
       - name: Install DMFF
         run: |
           source $CONDA/bin/activate dmff && pip install .
@@ -35,3 +35,8 @@ jobs:
           pytest -vs tests/test_utils.py
           pytest -vs tests/test_mbar/test_* 
           pytest -vs tests/test_sgnn/test_*
+          pytest -vs tests/test_difftraj/test_*
+          pytest -vs tests/test_frontend/test_*
+          pytest -vs tests/test_dimer/test_*
+          pytest -vs tests/test_energy.py
+          pytest -vs tests/test_ase/test_*

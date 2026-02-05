@@ -27,6 +27,8 @@ DOI: 10.1021/acs.jctc.2c01297`
   + [Optimization](docs/user_guide/4.5Optimization.md)
   + [Mbar Estimator](docs/user_guide/4.6MBAR.md)
   + [OpenMM Plugin](docs/user_guide/4.7OpenMMplugin.md)
+  + [DiffTraj](docs/user_guide/4.8DiffTraj.md)
+  + [ASE MD interface](docs/user_guide/4.9ASE.md)
 + [5. Advanced examples](docs/user_guide/DMFF_example.ipynb)
 + [And here is a tutorial notebook of the basic usage of DMFF. Welcome to read it and get started with DMFF!](docs/user_guide/test.ipynb)
 
@@ -34,10 +36,9 @@ DOI: 10.1021/acs.jctc.2c01297`
 
 ## Developer Guide
 + [1. Introduction](docs/dev_guide/introduction.md)
-+ [2. Software architecture](docs/dev_guide/arch.md)
-+ [3. Coding conventions](docs/dev_guide/convention.md)
-+ [4. Document writing](docs/dev_guide/write_docs.md)
-+ [5. An example for developing: how to write a generator?](docs/dev_guide/generator.ipynb)
++ [2. Coding conventions](docs/dev_guide/convention.md)
++ [3. Document writing](docs/dev_guide/write_docs.md)
++ [4. An example for developing: how to write a generator?](docs/dev_guide/generator.ipynb)
 
 ## Code Structure
 

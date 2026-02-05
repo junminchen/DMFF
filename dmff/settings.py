@@ -1,4 +1,4 @@
-import jax
+from jax import config
 
 PRECISION = 'double'  # 'double'
 

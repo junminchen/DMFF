@@ -13,6 +13,7 @@ import pickle
 # from jax.config import config
 # config.update("jax_debug_nans", True)
 
+
 def get_elem_indices(topology):
     species = []
     elements = []
@@ -247,7 +248,7 @@ class EANNForce:
         f_cut = cutoff_cosine(dr_norm, self.rc)
         neigh_list = jnp.concatenate((pairs,pairs[:,[1,0]]),axis=0)
         buffer_scales_ = jnp.concatenate((buffer_scales,buffer_scales),axis=0)
-        totneighbour = len(neigh_list)
+        totneighbour = neigh_list.shape[0]
         prefacs = f_cut.reshape(1, -1)
         angular = prefacs
         for ipsin in range(1,self.nipsin+1):
@@ -300,17 +301,21 @@ class EANNForce:
             buffer_scales = pair_buffer_scales(pairs)
 
             # get distances
-            box_inv = jnp.linalg.inv(box)
+            box_inv = jnp.linalg.inv(box + jnp.eye(3) * 1e-36)
             ri = distribute_v3(positions, pairs[:, 0])
             rj = distribute_v3(positions, pairs[:, 1])
             dr = rj - ri
             dr = pbc_shift(dr, box, box_inv)
 
             dr_norm = jnp.linalg.norm(dr, axis=1)
+            buffer_scales2 = jnp.piecewise(buffer_scales, (dr_norm <= self.rc, dr_norm > self.rc),
+                              (lambda x: jnp.array(1), lambda x: jnp.array(0)))
+            buffer_scales = buffer_scales2 * buffer_scales
             self.rs = params['density.rs']
             self.inta = params['density.inta']
 
-            radial_i, radial_j = get_gto(jnp.arange(len(dr_norm)), dr_norm, pairs, self.rc, self.rs, self.inta, self.elem_indices)
+            length_dr_norm = dr_norm.shape[0]
+            radial_i, radial_j = get_gto(jnp.arange(length_dr_norm), dr_norm, pairs, self.rc, self.rs, self.inta, self.elem_indices)
             radial = jnp.concatenate((radial_i,radial_j), axis=0)
             orb_coeff = params['density.params'][self.elem_indices,:] # (48,16)
 
