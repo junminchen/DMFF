@@ -8,7 +8,7 @@ from dmff import Hamiltonian, NeighborList, DMFFTopology
 from jax import jit, value_and_grad
 from jax import config
 
-config.update("jax_debug_nans", True)
+jax.config.update("jax_debug_nans", True)
 
 class TestGradDispersion:
 

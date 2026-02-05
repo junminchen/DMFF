@@ -63,6 +63,7 @@ class ADMPPmeForce:
         lpme=True,
         steps_pol=None,
         has_aux=False,
+        damp_type=POL_DAMP_THOLE,
     ):
         """
         Initialize the ADMPPmeForce calculator.
@@ -87,6 +88,8 @@ class ADMPPmeForce:
                 None or int: Whether do fixed number of dipole iteration steps?
                 if None: converge dipoles until convergence threshold is met
                 if int: optimize for this many steps and stop, this is useful if you want to jit the entire function
+            damp_type:
+                int: damping type for polarization (0=Thole, 1=TT, 2=Thole*TT)
 
         Output:
 
@@ -116,6 +119,7 @@ class ADMPPmeForce:
         # self.n_atoms = int(covalent_map.shape[0]) # len(axis_type)
         self.n_atoms = len(axis_type)
         self.has_aux = has_aux
+        self.damp_type = damp_type
 
         self.Q_local_to_global = self.generate_Q_global_function()
 
@@ -164,6 +168,7 @@ class ADMPPmeForce:
                 mScales,
                 pScales,
                 dScales,
+                B_pol=None,
             ):
                 return energy_pme(
                     positions,
@@ -185,6 +190,8 @@ class ADMPPmeForce:
                     self.lmax,
                     True,
                     lpme=self.lpme,
+                    B_pol=B_pol,
+                    damp_type=self.damp_type,
                 )
 
             self.energy_fn = energy_fn
@@ -205,6 +212,7 @@ class ADMPPmeForce:
                 dScales,
                 U_init=U_ind,
                 aux=None,
+                B_pol=None,
             ):
                 U_ind, lconverg, n_cycle = self.optimize_Uind(
                     positions,
@@ -218,6 +226,7 @@ class ADMPPmeForce:
                     dScales,
                     U_init=U_init * 10.0,
                     steps_pol=self.steps_pol,
+                    B_pol=B_pol,
                 )  # nm to angstrom
                 self.U_ind = U_ind
                 # here we rely on Feynman-Hellman theorem, drop the term dV/dU*dU/dr !
@@ -233,6 +242,7 @@ class ADMPPmeForce:
                     mScales,
                     pScales,
                     dScales,
+                    B_pol,
                 )
                 if aux is not None:
                     aux["U_ind"] = U_ind * 0.1  # Angstrom to nm
@@ -365,6 +375,7 @@ class ADMPPmeForce:
         steps_pol=None,
         maxiter=MAX_N_POL,
         thresh=POL_CONV,
+        B_pol=None,
     ):
         """
         This function converges the induced dipole
@@ -380,6 +391,8 @@ class ADMPPmeForce:
         mScales = jax.lax.stop_gradient(mScales)
         pScales = jax.lax.stop_gradient(pScales)
         dScales = jax.lax.stop_gradient(dScales)
+        if B_pol is not None:
+            B_pol = jax.lax.stop_gradient(B_pol)
         if U_init is None:
             U = jnp.zeros((self.n_atoms, 3))
         else:
@@ -400,6 +413,7 @@ class ADMPPmeForce:
                     mScales,
                     pScales,
                     dScales,
+                    B_pol,
                 )
                 # E = self.energy_fn(positions, box, pairs, Q_local, U, pol, tholes, mScales, pScales, dScales)
                 if jnp.max(jnp.abs(field[site_filter])) < thresh:
@@ -424,6 +438,7 @@ class ADMPPmeForce:
                     mScales,
                     pScales,
                     dScales,
+                    B_pol,
                 )
                 U = U - field * pol[:, jnp.newaxis] / DIELECTRIC
                 # soft truncation: stop polarization catastrophe
@@ -526,6 +541,8 @@ def energy_pme(
     lmax,
     lpol,
     lpme=True,
+    B_pol=None,
+    damp_type=POL_DAMP_THOLE,
 ):
     """
     This is the top-level wrapper for multipole PME
@@ -564,6 +581,10 @@ def energy_pme(
             bool: if polarizable or not? if yes, 1, otherwise 0
         lpme:
             bool: doing pme? If false, then turn off reciprocal space and set kappa = 0
+        B_pol:
+            (Na,) float: B parameters for TT damping on polarization (in A^-1)
+        damp_type:
+            int: damping type for polarization (0=Thole, 1=TT, 2=Thole*TT)
 
     Output:
         energy: total pme energy
@@ -607,6 +628,8 @@ def energy_pme(
             kappa,
             lmax,
             True,
+            B_pol,
+            damp_type,
         )
     else:
         ene_real = pme_real(
@@ -803,8 +826,58 @@ def gen_trim_val_infty(thresh):
 trim_val_infty = gen_trim_val_infty(1e8)
 
 
-@jit_condition(static_argnums=(7))
-def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
+@jit_condition(static_argnums=())
+def compute_tt_damping_pol(dr, b1, b2):
+    r"""
+    Compute Tang-Toennies damping factors for polarization.
+    
+    TT damping function: f_n(x) = 1 - e^{-x} * \sum_{k=0}^{n} x^k/k!
+    
+    For polarization, we need:
+    - f1 for charge-induced dipole (order 1)
+    - f3 for dipole-induced dipole (order 3)
+    - f5 for quadrupole-induced dipole (order 5)
+    
+    Inputs:
+        dr:
+            float: distance between one pair of particles (in Angstrom)
+        b1:
+            float: B parameter of atom i (in A^-1)
+        b2:
+            float: B parameter of atom j (in A^-1)
+    
+    Output:
+        tt_c, tt_d0, tt_d1, tt_q0, tt_q1: TT damping factors
+    """
+    b = jnp.sqrt(b1 * b2)
+    br = b * dr
+    
+    # Avoid overflow for large br
+    br = jnp.minimum(br, MAX_BR_TT_DAMPING)
+    exp_br = jnp.exp(-br)
+    
+    br2 = br * br
+    br3 = br2 * br
+    br4 = br3 * br
+    br5 = br4 * br
+    
+    # TT damping factors for different orders
+    # f1 = 1 - exp(-br) * (1 + br) for charge-dipole
+    # f3 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6) for dipole-dipole
+    # f5 = 1 - exp(-br) * (1 + br + br^2/2 + br^3/6 + br^4/24 + br^5/120) for quadrupole-dipole
+    
+    tt_c = 1.0 - exp_br * (1.0 + br)
+    tt_d0 = 1.0 - exp_br * (1.0 + br + br2 / 2.0 + br3 / 6.0)
+    tt_d1 = 1.0 - exp_br * (1.0 + br + br2 / 2.0)
+    tt_q0 = 1.0 - exp_br * (1.0 + br + br2 / 2.0 + br3 / 6.0 + br4 / 24.0 + br5 / 120.0)
+    tt_q1 = 1.0 - exp_br * (1.0 + br + br2 / 2.0 + br3 / 6.0 + br4 / 24.0)
+    
+    return tt_c, tt_d0, tt_d1, tt_q0, tt_q1
+
+
+@jit_condition(static_argnums=(7, 10))
+def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2, 
+               b1=None, b2=None, damp_type=POL_DAMP_THOLE):
     r"""
     This function calculates the eUindCoefs at once
        ## compute the Thole damping factors for energies
@@ -827,6 +900,12 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
             float: \kappa in PME, unit in A^-1
         lmax:
             int: max L
+        b1:
+            float: B parameter of atom i for TT damping (in A^-1)
+        b2:
+            float: B parameter of atom j for TT damping (in A^-1)
+        damp_type:
+            int: damping type (0=Thole, 1=TT, 2=Thole*TT)
 
     Output:
         Interaction tensors components
@@ -882,7 +961,7 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
         tmp *= 2 * alphaRVec[2]
 
     ## C-Uind
-    cud = 2.0 * rInvVec[2] * (pscales * thole_c + bVec[2])
+    cud = 2.0 * rInvVec[2] * (pscales * damp_c + bVec[2])
     if lmax >= 1:
         ##  D-Uind terms
         dud_m0 = (
@@ -890,12 +969,12 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
             * 2.0
             / 3.0
             * rInvVec[3]
-            * (3.0 * (pscales * thole_d0 + bVec[3]) + alphaRVec[3] * X)
+            * (3.0 * (pscales * damp_d0 + bVec[3]) + alphaRVec[3] * X)
         )
         dud_m1 = (
             2.0
             * rInvVec[3]
-            * (pscales * thole_d1 + bVec[3] - 2.0 / 3.0 * alphaRVec[3] * X)
+            * (pscales * damp_d1 + bVec[3] - 2.0 / 3.0 * alphaRVec[3] * X)
         )
     else:
         dud_m0 = 0.0
@@ -906,9 +985,9 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
         udq_m0 = (
             2.0
             * rInvVec[4]
-            * (3.0 * (pscales * thole_q0 + bVec[3]) + 4 / 3 * alphaRVec[5] * X)
+            * (3.0 * (pscales * damp_q0 + bVec[3]) + 4 / 3 * alphaRVec[5] * X)
         )
-        udq_m1 = -2.0 * jnp.sqrt(3) * rInvVec[4] * (pscales * thole_q1 + bVec[3])
+        udq_m1 = -2.0 * jnp.sqrt(3) * rInvVec[4] * (pscales * damp_q1 + bVec[3])
     else:
         udq_m0 = 0.0
         udq_m1 = 0.0
@@ -935,14 +1014,14 @@ def calc_e_ind(dr, thole1, thole2, dmp, pscales, dscales, kappa, lmax=2):
         -2.0
         / 3.0
         * rInvVec[3]
-        * (3.0 * (dscales * thole_d0 + bVec[3]) + alphaRVec[3] * X)
+        * (3.0 * (dscales * damp_d0 + bVec[3]) + alphaRVec[3] * X)
     )
     udud_m1 = rInvVec[3] * (dscales * thole_d1 + bVec[3] - 2.0 / 3.0 * alphaRVec[3] * X)
     return cud, dud_m0, dud_m1, udq_m0, udq_m1, udo_m0, udo_m1, udud_m0, udud_m1
 
 
-@partial(vmap, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None), out_axes=0)
-@jit_condition(static_argnums=(12, 13))
+@partial(vmap, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None), out_axes=0)
+@jit_condition(static_argnums=(14, 15, 16))
 def pme_real_kernel(
     dr,
     qiQI,
@@ -955,9 +1034,12 @@ def pme_real_kernel(
     mscales,
     pscales,
     dscales,
+    b1,
+    b2,
     kappa,
     lmax=2,
     lpol=False,
+    damp_type=POL_DAMP_THOLE,
 ):
     """
     This is the heavy-lifting kernel function to compute the realspace multipolar PME
@@ -986,12 +1068,18 @@ def pme_real_kernel(
             float, scaling factor between perm-ind interaction
         dscale:
             float, scaling factor between ind-ind interaction
+        b1:
+            float, B parameter of site i for TT damping (in A^-1)
+        b2:
+            float, B parameter of site j for TT damping (in A^-1)
         kappa:
             float, kappa in unit A^1
         lmax:
             int, maximum angular momentum
         lpol:
             bool, doing polarization?
+        damp_type:
+            int, damping type (0=Thole, 1=TT, 2=Thole*TT)
 
     Output:
         energy:
@@ -1205,6 +1293,8 @@ def pme_real(
     kappa,
     lmax,
     lpol,
+    B_pol=None,
+    damp_type=POL_DAMP_THOLE,
 ):
     """
     This is the real space PME calculate function
@@ -1239,6 +1329,10 @@ def pme_real(
             int: maximum L
         lpol:
             Bool: whether do a polarizable calculation?
+        B_pol:
+            (Na,): B parameters for TT damping on polarization (in A^-1)
+        damp_type:
+            int: damping type for polarization (0=Thole, 1=TT, 2=Thole*TT)
 
     Output:
         ene: pme realspace energy
@@ -1267,6 +1361,17 @@ def pme_real(
         dscales = distribute_scalar(dScales, indices)
         dscales = dscales * buffer_scales
         dmp = get_pair_dmp(pol1, pol2)
+        # TT damping B parameters
+        if B_pol is not None and damp_type != POL_DAMP_THOLE:
+            b1 = distribute_scalar(B_pol, pairs[:, 0])
+            b2 = distribute_scalar(B_pol, pairs[:, 1])
+        else:
+            # Create dummy arrays with correct shape for vmap compatibility.
+            # JAX's vmap requires consistent array shapes across iterations,
+            # so we use zero arrays when TT damping is not used.
+            n_pairs = pairs.shape[0]
+            b1 = jnp.zeros(n_pairs)
+            b2 = jnp.zeros(n_pairs)
     else:
         Uind_extendi = None
         Uind_extendj = None
@@ -1275,6 +1380,8 @@ def pme_real(
         thole1 = None
         thole2 = None
         dmp = None
+        b1 = None
+        b2 = None
 
     # deals with geometries
     dr = r1 - r2
@@ -1304,9 +1411,12 @@ def pme_real(
             mscales,
             pscales,
             dscales,
+            b1,
+            b2,
             kappa,
             lmax,
             lpol,
+            damp_type,
         )
         * buffer_scales
     )
