@@ -1389,4 +1389,3 @@ def pol_penalty(U_ind, pol):
     Uind_norm = jnp.linalg.norm(U_ind + 1e-16, axis=1)
     # pol_pi = pol/(jnp.exp((-pol+1e-08)*1e10)+1) + 1e-08/(jnp.exp((pol-1e-08)*1e10)+1)
     return jnp.sum(0.5 / pol_pi * jnp.power(U_ind + 1e-16, 2).sum(axis=1)) * DIELECTRIC
-

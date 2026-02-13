@@ -44,14 +44,6 @@ def distribute_dispcoeff(c_list, index):
 def distribute_matrix(multipoles,index1,index2):
     return multipoles[index1,index2]
 
-# 添加全局变量
-GLOBAL_ALPHA = 4.0
-
-def set_alpha(value):
-    global GLOBAL_ALPHA
-    GLOBAL_ALPHA = value
-    print(f"Alpha set to: {GLOBAL_ALPHA}")
-
 def generate_pairwise_interaction(pair_int_kernel, static_args):
     '''
     This is a calculator generator for pairwise interaction 
@@ -106,8 +98,6 @@ def generate_pairwise_interaction(pair_int_kernel, static_args):
 @vmap
 @jit_condition(static_argnums={})
 def TT_damping_qq_c6_kernel(dr, m, ai, aj, bi, bj, qi, qj, ci, cj):
-    # Add regularization
-    dr = jnp.maximum(dr, 0.05)
     a = jnp.sqrt(ai * aj)
     b = jnp.sqrt(bi * bj)
     c = ci * cj
@@ -129,8 +119,6 @@ def TT_damping_qq_c6_kernel(dr, m, ai, aj, bi, bj, qi, qj, ci, cj):
 @vmap
 @jit_condition(static_argnums={})
 def TT_damping_qq_kernel(dr, m, bi, bj, qi, qj):
-    # Add regularization
-    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
     q = qi * qj
     br = b * dr
@@ -148,8 +136,6 @@ def slater_disp_damping_kernel(dr, m, bi, bj, c6i, c6j, c8i, c8j, c10i, c10j):
     x = Br - \frac{2*(Br)^2 + 3Br}{(Br)^2 + 3*Br + 3}
     see jctc 12 3851
     '''
-    # Add regularization
-    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
     c6 = c6i * c6j
     c8 = c8i * c8j
@@ -176,22 +162,28 @@ def slater_sr_hc_kernel(dr, m, ai, aj, bi, bj):
     Slater-ISA type short range terms
     see jctc 12 3851
     '''
-    # Add regularization
-    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
-    a = jnp.abs(ai * aj)
+    a = ai * aj
     br = b * dr
     br2 = br * br
     P = 1/3 * br2 + br + 1 
 
-    alpha = 1/4.3
-    beta = 12
+    alpha = 0.24
+    beta = 14
     x = alpha * br
+    
+    s12 = 2.15
+    s12 = 1.69
+    s12 = 2.1
+    x = s12/dr
+
     x2 = x * x
     x4 = x2 * x2
     x8 = x4 * x4
     x12 = x4 * x8
-    HardCorePotential = a / x12 * m 
+    #x14 = x12 * x2
+    #HardCorePotential = a / x14 * m 
+    HardCorePotential = x12 * m 
     return a * P * jnp.exp(-br) * m + HardCorePotential 
 
 @vmap
@@ -202,10 +194,8 @@ def slater_sr_kernel(dr, m, ai, aj, bi, bj):
     Slater-ISA type short range terms
     see jctc 12 3851
     '''
-    # Add regularization
-    dr = jnp.maximum(dr, 0.05)
     b = jnp.sqrt(bi * bj)
-    a = jnp.abs(ai * aj)
+    a = ai * aj
     br = b * dr
     br2 = br * br
     P = 1/3 * br2 + br + 1
