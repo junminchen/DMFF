@@ -9,9 +9,9 @@ DEBUG = False
 
 def update_jax_precision(precision):
     if precision == 'double':
-        jax.config.update("jax_enable_x64", True)
+        config.update("jax_enable_x64", True)
     else:
-        jax.config.update("jax_enable_x64", False)
+        config.update("jax_enable_x64", False)
 
 
 update_jax_precision(PRECISION)
