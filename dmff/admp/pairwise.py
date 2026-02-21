@@ -156,7 +156,7 @@ def slater_disp_damping_kernel(dr, m, bi, bj, c6i, c6j, c8i, c8j, c10i, c10j):
 @vmap
 @jit_condition(static_argnums=())
 # with hardcore potential
-def slater_sr_hc_kernel(dr, m, ai, aj, bi, bj): 
+def slater_sr_hc_kernel(dr, m, ai, aj, bi, bj):
 
     '''
     Slater-ISA type short range terms
@@ -166,25 +166,18 @@ def slater_sr_hc_kernel(dr, m, ai, aj, bi, bj):
     a = ai * aj
     br = b * dr
     br2 = br * br
-    P = 1/3 * br2 + br + 1 
+    P = 1/3 * br2 + br + 1
 
-    alpha = 0.24
-    beta = 14
-    x = alpha * br
-    
-    s12 = 2.15
-    s12 = 1.69
-    s12 = 2.1
-    x = s12/dr
-
+    beta = 12
+    # x = alpha * br  
+    x = 1/4.3 * br
     x2 = x * x
     x4 = x2 * x2
     x8 = x4 * x4
     x12 = x4 * x8
-    #x14 = x12 * x2
-    #HardCorePotential = a / x14 * m 
-    HardCorePotential = x12 * m 
-    return a * P * jnp.exp(-br) * m + HardCorePotential 
+    HardCorePotential = a / x12 * m
+    # print(f"No HardCorePotential")
+    return a * P * jnp.exp(-br) * m + HardCorePotential
 
 @vmap
 @jit_condition(static_argnums=())
