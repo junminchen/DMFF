@@ -103,11 +103,11 @@
    </SlaterSrEsForce>
    <SlaterSrPolForce
        mScale12="0.00" mScale13="0.00" mScale14="0.00" mScale15="0.00" mScale16="0.00" >
-       <Atom type="1" A="1" B="3.977508e+01" />    
-       <Atom type="2" A="1" B="4.596271e+01" />    
-       <Atom type="3" A="1" B="4.637414e+01" />    
-       <Atom type="4" A="1" B="3.831504e+01" />    
-       <Atom type="5" A="1" B="4.632228e+01" />    
+       <Atom type="1" A="1" B="3.977508e+01" Pol="1.072970e-03"/>    
+       <Atom type="2" A="1" B="4.596271e+01" Pol="3.680091e-04"/>    
+       <Atom type="3" A="1" B="4.637414e+01" Pol="6.192140e-04"/>    
+       <Atom type="4" A="1" B="3.831504e+01" Pol="1.099428e-03"/>    
+       <Atom type="5" A="1" B="4.632228e+01" Pol="3.365314e-04"/>    
    </SlaterSrPolForce>
    <SlaterSrDispForce
        mScale12="0.00" mScale13="0.00" mScale14="0.00" mScale15="0.00" mScale16="0.00" >

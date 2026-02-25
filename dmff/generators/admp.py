@@ -16,6 +16,7 @@ from ..admp.pairwise import (
     slater_sr_kernel, ## no Hard Core Potential
     slater_sr_hc_kernel,  ## added Hard Core Potential
     TT_damping_qq_kernel,
+    TT_damping_pol_kernel,
 )
 from ..admp.pme import ADMPPmeForce
 
@@ -846,6 +847,90 @@ class SlaterSrEsGenerator(SlaterExGenerator):
 class SlaterSrPolGenerator(SlaterSrEsGenerator):
     def __init__(self, ffinfo: dict, paramset: ParamSet):
         super().__init__(ffinfo, paramset, default_name="SlaterSrPolForce")
+        
+        # Add polarizability parameters for polarization damping
+        Pol = []
+        pol_mask = []
+        for node in self.ffinfo["Forces"][self.name]["node"]:
+            if node["name"] == "Atom":
+                attribs = node["attrib"]
+                # Pol is optional - if not present, use 0.0 (no damping contribution)
+                if "Pol" in attribs:
+                    Pol.append(float(attribs["Pol"]))
+                else:
+                    Pol.append(0.0)
+                mask = 1.0
+                if "mask" in attribs and attribs["mask"].upper() == "TRUE":
+                    mask = 0.0
+                pol_mask.append(mask)
+        Pol = jnp.array(Pol)
+        pol_mask = jnp.array(pol_mask)
+        paramset.addParameter(Pol, "Pol", field=self.name, mask=pol_mask)
+    
+    def overwrite(self, paramset):
+        # Call parent overwrite for A and B
+        super().overwrite(paramset)
+        
+        # Also overwrite Pol parameter
+        Pol = paramset[self.name]["Pol"]
+        pol_mask = paramset.mask[self.name]["Pol"]
+        
+        nnode = 0
+        for node in self.ffinfo["Forces"][self.name]["node"]:
+            if node["name"] == "Atom":
+                Pol_new = Pol[nnode]
+                mask = pol_mask[nnode]
+                self.ffinfo["Forces"][self.name]["node"][nnode]["attrib"]["Pol"] = str(Pol_new)
+                if mask < 0.999:
+                    self.ffinfo["Forces"][self.name]["node"][nnode]["attrib"]["mask"] = "true"
+                nnode += 1
+    
+    def createPotential(
+        self, topdata: DMFFTopology, nonbondedMethod, nonbondedCutoff, **kwargs
+    ):
+        from ..admp.pairwise import TT_damping_pol_kernel
+        
+        n_atoms = topdata.getNumAtoms()
+        atoms = [a for a in topdata.atoms()]
+        # build index map
+        map_atomtype = np.zeros(n_atoms, dtype=int)
+        for i in range(n_atoms):
+            atype = atoms[i].meta[self.key_type]
+            map_atomtype[i] = np.where(self.atom_keys == atype)[0][0]
+
+        topdata._meta[self.name+"_map_atomtype"] = map_atomtype
+
+        # Get both kernels: original Slater SR and new TT damping for polarization
+        pot_fn_sr = generate_pairwise_interaction(slater_sr_kernel, static_args={})
+        pot_fn_pol_damping = generate_pairwise_interaction(TT_damping_pol_kernel, static_args={})
+
+        has_aux = False
+        if "has_aux" in kwargs and kwargs["has_aux"]:
+            has_aux = True
+
+        def potential_fn(positions, box, pairs, params, aux=None): 
+            positions = positions * 10
+            box = box * 10
+            params = params[self.name]
+            a_list = params["A"][map_atomtype]
+            b_list = params["B"][map_atomtype] / 10  # nm^-1 to A^-1
+            pol_list = params["Pol"][map_atomtype] * 1000.0  # nm^3 to A^3
+            
+            # Original Slater SR energy (with minus sign as in parent)
+            energy_sr = - pot_fn_sr(positions, box, pairs, self.mScales, a_list, b_list)
+            
+            # Add polarization damping energy (only for atoms with non-zero polarizability)
+            energy_pol_damping = pot_fn_pol_damping(positions, box, pairs, self.mScales, b_list, pol_list)
+            
+            energy = energy_sr + energy_pol_damping
+
+            if has_aux:
+                return energy, aux
+            else:
+                return energy
+
+        self._jaxPotential = potential_fn
+        return potential_fn
 
 
 class SlaterSrDispGenerator(SlaterSrEsGenerator):
