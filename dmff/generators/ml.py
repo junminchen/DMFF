@@ -25,6 +25,8 @@ class SGNNGenerator:
         self.file = self.ffinfo["Forces"][self.name]["meta"]["file"]
         self.nn = int(self.ffinfo["Forces"][self.name]["meta"]["nn"])
         self.pdb = self.ffinfo["Forces"][self.name]["meta"]["pdb"]
+        atype_meta = self.ffinfo["Forces"][self.name]["meta"].get("atype_index", None)
+        self.atype_index = self._parse_atype_index(atype_meta) if atype_meta is not None else None
 
         # load ML potential parameters
         with open(self.file, 'rb') as ifile:
@@ -38,7 +40,20 @@ class SGNNGenerator:
 
         # mask = jax.tree_util.tree_map(lambda x: jnp.ones(x.shape), params)
         # paramset.addParameter(params, "params", field=self.name, mask=mask)
-       
+
+    @staticmethod
+    def _parse_atype_index(text):
+        # format: "H:0,C:1,O:2"
+        mapping = {}
+        for token in str(text).split(','):
+            token = token.strip()
+            if not token:
+                continue
+            if ':' not in token:
+                raise DMFFException(f"Invalid atype_index token: {token}")
+            elem, idx = token.split(':', 1)
+            mapping[elem.strip()] = int(idx.strip())
+        return mapping
 
     def getName(self) -> str:
         return self.name
@@ -54,7 +69,10 @@ class SGNNGenerator:
     def createPotential(self, topdata: DMFFTopology, nonbondedMethod, nonbondedCutoff, **kwargs):
         self.G = from_pdb(self.pdb)
         n_atoms = topdata.getNumAtoms()
-        self.model = MolGNNForce(self.G, nn=self.nn)
+        if self.atype_index is None:
+            self.model = MolGNNForce(self.G, nn=self.nn)
+        else:
+            self.model = MolGNNForce(self.G, nn=self.nn, atype_index=self.atype_index)
         n_layers = self.model.n_layers
         def potential_fn(positions, box, pairs, params):
             # convert unit to angstrom
@@ -98,7 +116,7 @@ class EANNGenerator:
 
         # mask = jax.tree_util.tree_map(lambda x: jnp.ones(x.shape), params)
         # paramset.addParameter(params, "params", field=self.name, mask=mask)
-       
+
 
     def getName(self) -> str:
         return self.name
@@ -116,11 +134,11 @@ class EANNGenerator:
         n_elem, elem_indices = get_elem_indices(self.ommtopology)
         self.model = EANNForce(n_elem, elem_indices, n_gto=self.ngto, nipsin=self.nipsin, rc=self.rc)
         n_layers = self.model.n_layers
-        
+
         has_aux = False
         if "has_aux" in kwargs and kwargs["has_aux"]:
             has_aux = True
-        
+
         def potential_fn(positions, box, pairs, params, aux=None):
             # convert unit to angstrom
             positions = positions * 10
@@ -137,5 +155,3 @@ class EANNGenerator:
         return self._jaxPotential
 
 _DMFFGenerators["EANNForce"] = EANNGenerator
-
-

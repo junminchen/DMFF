@@ -43,6 +43,6 @@
            <ExternalBond atomName="C04" />
        </Residue>    
    </Residues>  
-   <SGNNForce file="model1.pickle" pdb="peg4.pdb" nn="1"/>
+   <SGNNForce file="model1.pickle" pdb="peg4.pdb" nn="1" atype_index="H:0,C:1,O:2"/>
 </ForceField>
 

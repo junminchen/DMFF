@@ -4,6 +4,7 @@ import sys
 from collections import OrderedDict
 from functools import partial
 
+import jax
 import jax.lax as lax
 import jax.nn.initializers
 import jax.numpy as jnp
@@ -15,18 +16,34 @@ from jax import value_and_grad, vmap
 
 
 def prm_transform_f2i(params, n_layers):
+    def _to_jax(v):
+        if isinstance(v, dict):
+            return {kk: _to_jax(vv) for kk, vv in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [_to_jax(x) for x in v]
+        try:
+            return jnp.array(v)
+        except Exception:
+            return v
+
     p = {}
     for k in params:
-        p[k] = jnp.array(params[k])
+        p[k] = _to_jax(params[k])
+
+    # Accept both old flat keys (fc0.0.weight) and grouped keys (fc0.weight as list).
     for i_nn in [0, 1]:
         nn_name = 'fc%d' % i_nn
-        p['%s.weight' % nn_name] = []
-        p['%s.bias' % nn_name] = []
+        key_w = '%s.weight' % nn_name
+        key_b = '%s.bias' % nn_name
+        if key_w in p and key_b in p:
+            continue
+        p[key_w] = []
+        p[key_b] = []
         for i_layer in range(n_layers[i_nn]):
             k_w = '%s.%d.weight' % (nn_name, i_layer)
             k_b = '%s.%d.bias' % (nn_name, i_layer)
-            p['%s.weight' % nn_name].append(p.pop(k_w, None))
-            p['%s.bias' % nn_name].append(p.pop(k_b, None))
+            p[key_w].append(p.pop(k_w, None))
+            p[key_b].append(p.pop(k_b, None))
     return p
 
 
@@ -102,6 +119,7 @@ class MolGNNForce:
                 atype_index=atype_index,
                 fscale_bond=fscale_bond,
                 fscale_angle=fscale_angle)
+        self.center_bonds_parent = self._center_bonds_parent_indices()
         params = OrderedDict()
         key = jax.random.PRNGKey(seed)
         params['w'] = jax.random.uniform(key)
@@ -185,7 +203,65 @@ class MolGNNForce:
 
             return self.G.weights.dot(energies)[0] * self.sigma + self.mu
 
+        @jit_condition(static_argnums=3)
+        def forward_with_components(positions, box, params, nn):
+            features = self.G.calc_subgraph_features(positions, box)
+
+            @jit_condition(static_argnums=())
+            @partial(vmap, in_axes=(0, None), out_axes=(0))
+            @partial(vmap, in_axes=(0, None), out_axes=(0))
+            def fc0(f_in, params):
+                f = f_in
+                for i in range(self.n_layers[0]):
+                    f = jnp.tanh(params['fc0.weight'][i].dot(f) +
+                                 params['fc0.bias'][i])
+                return f
+
+            @jit_condition(static_argnums=())
+            @partial(vmap, in_axes=(0, None), out_axes=(0))
+            def fc1(f_in, params):
+                f = f_in
+                for i in range(self.n_layers[1]):
+                    f = jnp.tanh(params['fc1.weight'][i].dot(f) +
+                                 params['fc1.bias'][i])
+                return f
+
+            @jit_condition(static_argnums=())
+            @partial(vmap, in_axes=(0, None), out_axes=(0))
+            def fc_final(f_in, params):
+                return params['fc_final.weight'].dot(
+                    f_in) + params['fc_final.bias']
+
+            @partial(vmap, in_axes=(0, 0, None, None), out_axes=(0))
+            def message_pass(f_in, nb_connect, w, nn):
+                if nn == 0:
+                    return f_in[0]
+                elif nn == 1:
+                    nb_connect0 = nb_connect[0:max_valence - 1]
+                    nb_connect1 = nb_connect[max_valence - 1:2 *
+                                             (max_valence - 1)]
+                    nb0 = jnp.sum(nb_connect0)
+                    nb1 = jnp.sum(nb_connect1)
+                    f = f_in[0] * (1 - jnp.heaviside(nb0, 0)*w - jnp.heaviside(nb1, 0)*w) + \
+                        w * nb_connect0.dot(f_in[1:max_valence, :]) / jnp.piecewise(nb0, [nb0<1e-5, nb0>=1e-5], [lambda x: jnp.array(1e-5), lambda x: x]) + \
+                        w * nb_connect1.dot(f_in[max_valence:2*max_valence-1, :])/ jnp.piecewise(nb1, [nb1<1e-5, nb1>=1e-5], [lambda x: jnp.array(1e-5), lambda x: x])
+                    return f
+
+            features = fc0(features, params)
+            features = message_pass(features, self.G.nb_connect, params['w'],
+                                    self.G.nn)
+            features = fc1(features, params)
+            energies = fc_final(features, params)
+
+            permutation_energy_raw = energies[:, 0]
+            weighted_perm = self.G.weights * permutation_energy_raw
+            map_idx = self.G.map_subgraph_perm.astype(jnp.int32)
+            subgraph_contrib_raw = jnp.zeros((self.G.n_subgraphs,), dtype=weighted_perm.dtype).at[map_idx].add(weighted_perm)
+            total_energy = jnp.sum(subgraph_contrib_raw) * self.sigma + self.mu
+            return total_energy, subgraph_contrib_raw, subgraph_contrib_raw * self.sigma, self.center_bonds_parent, permutation_energy_raw
+
         self.forward = partial(forward, nn=self.G.nn)
+        self._forward_with_components = partial(forward_with_components, nn=self.G.nn)
         self.batch_forward = vmap(self.forward,
                                   in_axes=(0, 0, None),
                                   out_axes=(0))
@@ -194,6 +270,29 @@ class MolGNNForce:
         self.get_energy = self.forward
 
         return
+
+    def _center_bonds_parent_indices(self):
+        center_bonds = []
+        for sg in self.G.subgraphs:
+            if len(getattr(sg, 'map_sub2parent', [])) < 2:
+                center_bonds.append([-1, -1])
+                continue
+            center_bonds.append([int(sg.map_sub2parent[0]), int(sg.map_sub2parent[1])])
+        return jnp.array(center_bonds, dtype=jnp.int32)
+
+    def forward_with_components(self, positions, box, params=None):
+        """Return total energy plus bond-centered local contributions."""
+        if params is None:
+            params = self.params
+        total_energy, subgraph_contrib_raw, subgraph_contrib_scaled, center_bonds_parent, permutation_energy_raw = \
+            self._forward_with_components(positions, box, params)
+        return {
+            'total_energy': total_energy,
+            'subgraph_contrib_raw': subgraph_contrib_raw,
+            'subgraph_contrib_scaled': subgraph_contrib_scaled,
+            'center_bonds_parent': center_bonds_parent,
+            'permutation_energy_raw': permutation_energy_raw,
+        }
 
 
     def load_params(self, ifn):
@@ -207,9 +306,6 @@ class MolGNNForce:
         """
         with open(ifn, 'rb') as ifile:
             params = pickle.load(ifile)
-        for k in params.keys():
-            params[k] = jnp.array(params[k])
-        # transform format
         self.params = prm_transform_f2i(params, self.n_layers)
         return
 
@@ -230,4 +326,3 @@ class MolGNNForce:
         with open(ofn, 'wb') as ofile:
             pickle.dump(params, ofile)
         return
-
