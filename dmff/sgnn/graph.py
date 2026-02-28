@@ -479,6 +479,21 @@ class TopGraph:
         self.diheds = jnp.array(diheds)
         self.n_diheds = len(self.diheds)
 
+        # Precompute IC lookup maps to avoid repeated O(N) scans during
+        # subgraph feature-index preparation.
+        self._bond_index_map = {}
+        self._angle_index_map = {}
+        self._dihed_index_map = {}
+        for idx, b in enumerate(np.array(self.bonds, dtype=int)):
+            key = self._canon_bond_key(int(b[0]), int(b[1]))
+            self._bond_index_map[key] = int(idx)
+        for idx, a in enumerate(np.array(self.angles, dtype=int)):
+            key = self._canon_angle_key(int(a[0]), int(a[1]), int(a[2]))
+            self._angle_index_map[key] = int(idx)
+        for idx, d in enumerate(np.array(self.diheds, dtype=int)):
+            key = self._canon_dihed_key(int(d[0]), int(d[1]), int(d[2]), int(d[3]))
+            self._dihed_index_map[key] = int(idx)
+
         # setup the calc_internal_coord_feature function
         @jit_condition(static_argnums=())
         def calc_internal_coords_features(positions, box):
@@ -544,6 +559,31 @@ class TopGraph:
         self.calc_internal_coords_features = calc_internal_coords_features
 
         return
+
+    @staticmethod
+    def _canon_bond_key(i, j):
+        a = int(i)
+        b = int(j)
+        if a <= b:
+            return (a, b)
+        return (b, a)
+
+    @staticmethod
+    def _canon_angle_key(i, j, k):
+        a = int(i)
+        b = int(j)
+        c = int(k)
+        if a <= c:
+            return (a, b, c)
+        return (c, b, a)
+
+    @staticmethod
+    def _canon_dihed_key(i, j, k, l):
+        a = (int(i), int(j), int(k), int(l))
+        b = (int(l), int(k), int(j), int(i))
+        if a <= b:
+            return a
+        return b
 
     def prepare_subgraph_feature_calc(self, 
             max_valence=MAX_VALENCE, 
@@ -933,6 +973,48 @@ class TopSubGraph(TopGraph):
         '''
         indices = {}
         G = self.parent
+
+        def lookup_bond_index(p):
+            if np.any(np.array(p) < 0):
+                return -1
+            p0 = int(p[0])
+            p1 = int(p[1])
+            if hasattr(G, "_bond_index_map"):
+                return int(G._bond_index_map.get(G._canon_bond_key(p0, p1), -1))
+            match = np.where(
+                np.all(G.bonds == np.array([p0, p1]), axis=1) +
+                np.all(G.bonds == np.array([p1, p0]), axis=1))[0]
+            return int(match[0]) if len(match) > 0 else -1
+
+        def lookup_angle_index(p):
+            if np.any(np.array(p) < 0):
+                return -1
+            p0 = int(p[0])
+            p1 = int(p[1])
+            p2 = int(p[2])
+            if hasattr(G, "_angle_index_map"):
+                return int(G._angle_index_map.get(G._canon_angle_key(p0, p1, p2), -1))
+            match = np.where(
+                np.all(G.angles == np.array([p0, p1, p2]), axis=1) +
+                np.all(G.angles == np.array([p2, p1, p0]), axis=1))[0]
+            return int(match[0]) if len(match) > 0 else -1
+
+        def lookup_dihed_index(p):
+            if np.any(np.array(p) < 0):
+                return -1
+            if getattr(self.parent, "is_small", False):
+                return -1
+            p0 = int(p[0])
+            p1 = int(p[1])
+            p2 = int(p[2])
+            p3 = int(p[3])
+            if hasattr(G, "_dihed_index_map"):
+                return int(G._dihed_index_map.get(G._canon_dihed_key(p0, p1, p2, p3), -1))
+            match = np.where(
+                np.all(G.diheds == np.array([p0, p1, p2, p3]), axis=1) +
+                np.all(G.diheds == np.array([p3, p2, p1, p0]), axis=1))[0]
+            return int(match[0]) if len(match) > 0 else -1
+
         indices_atoms_center = np.array(bond)
         indices_atoms_center = sort_by_order(indices_atoms_center, map_order)
         i, j = indices_atoms_center
@@ -962,13 +1044,7 @@ class TopSubGraph(TopGraph):
         indices['bonds'] = []
         for b in indices_bonds:
             p = np.array([self.map_sub2parent[i] for i in b])
-            match = np.where(
-                np.all(G.bonds == p, axis=1) +
-                np.all(G.bonds == p[::-1], axis=1))[0]
-            if len(match) == 0:
-                indices['bonds'].append(-1)
-            else:
-                indices['bonds'].append(match[0])
+            indices['bonds'].append(lookup_bond_index(p))
         indices['bonds'] = np.array(indices['bonds'], dtype=int)
 
         # relevant angles
@@ -993,22 +1069,10 @@ class TopSubGraph(TopGraph):
         indices['angles1'] = []
         for a in indices_angles_0:
             p = np.array([self.map_sub2parent[i] for i in a])
-            match = np.where(
-                np.all(G.angles == p, axis=1) +
-                np.all(G.angles == p[::-1], axis=1))[0]
-            if len(match) == 0:
-                indices['angles0'].append(-1)
-            else:
-                indices['angles0'].append(match[0])
+            indices['angles0'].append(lookup_angle_index(p))
         for a in indices_angles_1:
             p = np.array([self.map_sub2parent[i] for i in a])
-            match = np.where(
-                np.all(G.angles == p, axis=1) +
-                np.all(G.angles == p[::-1], axis=1))[0]
-            if len(match) == 0:
-                indices['angles1'].append(-1)
-            else:
-                indices['angles1'].append(match[0])
+            indices['angles1'].append(lookup_angle_index(p))
         indices['angles0'] = np.array(indices['angles0'], dtype=int)
         indices['angles1'] = np.array(indices['angles1'], dtype=int)
 
@@ -1022,16 +1086,7 @@ class TopSubGraph(TopGraph):
         indices['diheds'] = []
         for d in indices_diheds:
             p = np.array([self.map_sub2parent[i] for i in d])
-            if self.parent.is_small:
-                match = np.array([])
-            else:
-                match = np.where(
-                    np.all(G.diheds == p, axis=1) +
-                    np.all(G.diheds == p[::-1], axis=1))[0]
-            if len(match) == 0:
-                indices['diheds'].append(-1)
-            else:
-                indices['diheds'].append(match[0])
+            indices['diheds'].append(lookup_dihed_index(p))
         indices['diheds'] = np.array(indices['diheds'], dtype=int)
 
         # number of features to describe a bond
